@@ -47,6 +47,7 @@ WEB_STATIC_DIR = WEB_DIR / "static"
 DEFAULT_INDEX_PATH = SCRIPT_DIR / "dataset" / "motion_index.jsonl"
 DEFAULT_CACHE_ROOT = SCRIPT_DIR / "cache" / "models"
 DEFAULT_PREVIEW_ROOT = Path("/mnt/nas/cy/humanmotion/multimotion_previews")
+DEFAULT_CACHE_MAX_GIB = 12.0
 DEFAULT_MODEL_DIR = MULTIMOTION_DIR / "models" / "smplh"
 DEFAULT_SMPLX_MODEL_DIR = MULTIMOTION_DIR / "models" / "smplx"
 DEFAULT_CONVERTER_ENV = "sam2dam2"
@@ -766,10 +767,12 @@ class MotionQueryServer(ThreadingHTTPServer):
         translation_model: str | None = None,
         translation_device: int = DEFAULT_LOCAL_TRANSLATION_DEVICE,
         translation_max_length: int = DEFAULT_LOCAL_TRANSLATION_MAX_LENGTH,
+        cache_max_gib: float = DEFAULT_CACHE_MAX_GIB,
     ) -> None:
         super().__init__(server_address, request_handler)
         self.motion_index = motion_index
         self.cache_manifest = CacheManifest(motion_index.cache_root)
+        self.cache_max_bytes = max(0, int(cache_max_gib * 1024**3))
         self.model_dir = model_dir
         self.frame_step = frame_step
         self.interx_fps = interx_fps
@@ -814,6 +817,14 @@ class MotionQueryServer(ThreadingHTTPServer):
                     max_length=self.translation_max_length,
                 )
             return self._translator
+
+    def cache_summary(self) -> dict[str, int]:
+        stats = self.cache_manifest.stats()
+        return {
+            "cache_bytes": stats["total_bytes"],
+            "cache_file_count": stats["file_count"],
+            "cache_limit_bytes": self.cache_max_bytes,
+        }
 
 
 class MotionQueryRequestHandler(BaseHTTPRequestHandler):
@@ -1016,7 +1027,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                     **{axis: value for axis, value in axis_filters.items() if value},
                 },
                 "sort": sort_key,
-                "summary": self.server.motion_index.get_summary(),
+                "summary": {**self.server.motion_index.get_summary(), **self.server.cache_summary()},
             },
         )
 
@@ -1439,6 +1450,8 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 self.wfile.write(chunk)
+        if self.server.cache_max_bytes:
+            self.server.cache_manifest.prune(max_bytes=self.server.cache_max_bytes)
 
     def _build_root_payload(self) -> dict[str, Any]:
         summary = self.server.motion_index.get_summary()
@@ -1472,6 +1485,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "entry_count": summary["entry_count"],
             "dataset_counts": summary["dataset_counts"],
             "cached_model_count": summary["cached_model_count"],
+            **self.server.cache_summary(),
             "index_path": summary["index_path"],
             "cache_root": summary["cache_root"],
             "lazy_conversion": True,
@@ -1607,6 +1621,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve the multimotion lazy retrieval API.")
     parser.add_argument("--index", default=str(DEFAULT_INDEX_PATH), help=f"Motion index JSONL. Default: {DEFAULT_INDEX_PATH}")
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_ROOT), help=f"GLB cache root. Default: {DEFAULT_CACHE_ROOT}")
+    parser.add_argument("--cache-max-gib", type=float, default=DEFAULT_CACHE_MAX_GIB, help="Maximum total GLB cache size in GiB; 0 disables automatic pruning.")
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR), help=f"SMPL-H model directory. Default: {DEFAULT_MODEL_DIR}")
     parser.add_argument(
         "--converter-env",
@@ -1675,6 +1690,7 @@ def main() -> None:
         translation_model=args.translation_model,
         translation_device=args.translation_device,
         translation_max_length=args.translation_max_length,
+        cache_max_gib=args.cache_max_gib,
     )
     example_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     print(

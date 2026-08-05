@@ -188,7 +188,7 @@ function renderCardPreviews(items) {
   cardPreviewQueue.running = 0;
   items.forEach((item, index) => {
     const target = document.querySelector(`[data-card-preview="${index}"]`);
-    if (!target || (!item?.model?.download_url && !item?.preview?.download_url)) return;
+    if (!target || !item?.preview?.download_url) return;
     cardPreviewQueue.jobs.push(() => renderOneCardPreview(item, target));
   });
   pumpCardPreviewQueue();
@@ -215,7 +215,7 @@ function renderOneCardPreview(item, target) {
       target.innerHTML = "<span>点击“播放完整”后生成预览</span>";
       return resolve();
     }
-    target.innerHTML = `<span>${item.cached ? "读取中间帧" : "正在生成 GLB"}</span>`;
+    target.innerHTML = "<span>点击“播放完整”查看 3D 动作</span>";
     const miniScene = new THREE.Scene();
     miniScene.background = new THREE.Color(0x101820);
     const miniCamera = new THREE.PerspectiveCamera(42, 1, 0.01, 200);
@@ -321,7 +321,10 @@ async function loadLibrary() {
   const summary = payload.summary || {};
   const coverage = summary.cache_coverage || {};
   const cachedText = Object.entries(coverage).map(([dataset, values]) => `${dataset} ${Number(values.cached || 0).toLocaleString()}/${Number(values.total || 0).toLocaleString()}`).join(" · ");
-  $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 · ${cachedText || `${Number(summary.cached_model_count || 0).toLocaleString()} 个 GLB`}`;
+  const cacheGiB = Number(summary.cache_bytes || 0) / (1024 ** 3);
+  const limitGiB = Number(summary.cache_limit_bytes || 0) / (1024 ** 3);
+  const cacheText = limitGiB ? `缓存 ${cacheGiB.toFixed(1)}/${limitGiB.toFixed(0)} GiB` : `${Number(summary.cached_model_count || 0).toLocaleString()} 个 GLB`;
+  $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 · ${cacheText} · ${cachedText}`;
 }
 
 function setViewerStatus(text) { $("#viewerStatus").textContent = text; }
