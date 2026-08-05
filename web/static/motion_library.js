@@ -127,20 +127,6 @@ function renderDatasetFilters() {
   }));
 }
 
-function renderCacheFilters() {
-  const counts = state.facets.cached || {};
-  const root = $("#cacheFilters");
-  root.innerHTML = [
-    chip("已缓存", counts.true, state.filters.cached === "true", 'data-cached="true"'),
-    chip("未缓存", counts.false, state.filters.cached === "false", 'data-cached="false"'),
-  ].join("");
-  root.querySelectorAll("[data-cached]").forEach((button) => button.addEventListener("click", () => {
-    state.filters.cached = state.filters.cached === button.dataset.cached ? "" : button.dataset.cached;
-    state.offset = 0;
-    loadLibrary();
-  }));
-}
-
 function tagsFor(item) {
   const labels = item.taxonomy_labels || {};
   const actionNodes = (item.action_nodes || []).slice(0, 3).map((node) => `<button class="tag action-tag" type="button" data-card-node-id="${escapeHtml(node.id)}">${escapeHtml(node.label)}</button>`).join("");
@@ -162,10 +148,10 @@ function renderCards(items) {
   root.innerHTML = items.map((item, index) => {
     const model = item.model || {};
     const frames = item.frame_count ? `${Number(item.frame_count).toLocaleString()} 帧` : "帧数未知";
-    return `<article class="motion-card${item.cached ? " cached" : ""}">
-      <div class="card-preview" data-card-preview="${index}"><span>${item.preview?.available ? "读取预览" : item.cached ? "读取第一帧" : "点击播放后生成"}</span></div>
+    return `<article class="motion-card">
+      <div class="card-preview" data-card-preview="${index}"><span>${item.preview?.available ? "读取预览" : "暂无缩略图"}</span></div>
       <div class="card-body">
-        <div class="card-top"><span>${escapeHtml(item.dataset)} · ${escapeHtml(item.motion_id)}</span><span>${item.cached ? "已缓存" : "点击后缓存"}</span></div>
+        <div class="card-top"><span>${escapeHtml(item.dataset)} · ${escapeHtml(item.motion_id)}</span><span>WebP 缩略图</span></div>
         <h3>${escapeHtml(item.description || item.motion_id)}</h3>
         <p class="description">${escapeHtml((item.captions || []).join(" / "))}</p>
         <div class="tags">${tagsFor(item)}<span class="tag">${frames}</span></div>
@@ -211,51 +197,9 @@ function renderOneCardPreview(item, target) {
       target.innerHTML = `<img src="${escapeHtml(item.preview.download_url)}" alt="${escapeHtml(item.motion_id)} 预览图" loading="lazy">`;
       return resolve();
     }
-    if (!item.cached) {
-      target.innerHTML = "<span>点击“播放完整”后生成预览</span>";
-      return resolve();
-    }
-    target.innerHTML = "<span>点击“播放完整”查看 3D 动作</span>";
-    const miniScene = new THREE.Scene();
-    miniScene.background = new THREE.Color(0x101820);
-    const miniCamera = new THREE.PerspectiveCamera(42, 1, 0.01, 200);
-    miniScene.add(new THREE.HemisphereLight(0xffffff, 0x273241, 2.4));
-    const light = new THREE.DirectionalLight(0xffffff, 2.0);
-    light.position.set(3, 6, 4);
-    miniScene.add(light);
-    const miniRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    miniRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-
-    const loader = new GLTFLoader();
-    loader.load(item.model.download_url, (gltf) => {
-      target.innerHTML = "";
-      target.appendChild(miniRenderer.domElement);
-      const width = Math.max(target.clientWidth, 1);
-      const height = Math.max(target.clientHeight, 1);
-      miniRenderer.setSize(width, height, false);
-      miniCamera.aspect = width / height;
-      miniCamera.updateProjectionMatrix();
-      miniScene.add(gltf.scene);
-      applyPreviewFrame(gltf);
-      fitObjectCamera(gltf.scene, miniCamera, 1.56, isMotionXppDataset(item.dataset));
-      miniRenderer.render(miniScene, miniCamera);
-      resolve();
-    }, undefined, (error) => {
-      target.innerHTML = `<span>第一帧不可用：${escapeHtml(error.message || "加载失败")}</span>`;
-      miniRenderer.dispose();
-      resolve();
-    });
+    target.innerHTML = "<span>暂无缩略图</span>";
+    resolve();
   });
-}
-
-function applyPreviewFrame(gltf) {
-  if (!gltf.animations || !gltf.animations.length) return;
-  const previewMixer = new THREE.AnimationMixer(gltf.scene);
-  gltf.animations.forEach((clip) => previewMixer.clipAction(clip).play());
-  const firstTrack = gltf.animations[0].tracks && gltf.animations[0].tracks[0];
-  const secondTime = firstTrack && firstTrack.times && firstTrack.times.length > 1 ? Number(firstTrack.times[1]) : 1 / 30;
-  previewMixer.setTime(Number.isFinite(secondTime) ? secondTime : 1 / 30);
-  previewMixer.update(0);
 }
 
 function fitObjectCamera(object, targetCamera, padding = 1.7, fixedFront = false) {
@@ -314,17 +258,11 @@ async function loadLibrary() {
   state.items = payload.items || [];
   renderCards(state.items);
   renderDatasetFilters();
-  renderCacheFilters();
   renderTaxonomyFilters();
   renderPager();
   $("#resultTitle").textContent = `动作结果 · ${state.total}`;
   const summary = payload.summary || {};
-  const coverage = summary.cache_coverage || {};
-  const cachedText = Object.entries(coverage).map(([dataset, values]) => `${dataset} ${Number(values.cached || 0).toLocaleString()}/${Number(values.total || 0).toLocaleString()}`).join(" · ");
-  const cacheGiB = Number(summary.cache_bytes || 0) / (1024 ** 3);
-  const limitGiB = Number(summary.cache_limit_bytes || 0) / (1024 ** 3);
-  const cacheText = limitGiB ? `缓存 ${cacheGiB.toFixed(1)}/${limitGiB.toFixed(0)} GiB` : `${Number(summary.cached_model_count || 0).toLocaleString()} 个 GLB`;
-  $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 · ${cacheText} · ${cachedText}`;
+  $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 · WebP 缩略图 · 按需 3D`;
 }
 
 function setViewerStatus(text) { $("#viewerStatus").textContent = text; }
@@ -381,7 +319,7 @@ async function previewItem(item) {
   if (!url) { setViewerStatus("这个动作没有可用的 GLB 下载地址。"); return; }
   $("#downloadLink").href = url;
   $("#downloadLink").classList.remove("disabled");
-  setViewerStatus(item.cached ? "正在加载已缓存 GLB..." : "正在按需生成 GLB，第一次可能会慢一点...");
+  setViewerStatus("正在临时生成 GLB，完成后立即清理文件...");
   const loader = new GLTFLoader();
   loader.load(url, (gltf) => {
     if (currentObject) scene.remove(currentObject);

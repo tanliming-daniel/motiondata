@@ -19,8 +19,10 @@ os.environ.setdefault("USE_TORCH", "1")
 from pathlib import Path
 import random
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from typing import Any
 
@@ -35,7 +37,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import Request, urlopen
 
 import motion_taxonomy
-from cache_manifest import CacheManifest
 from search_index import SearchIndex
 
 
@@ -47,7 +48,7 @@ WEB_STATIC_DIR = WEB_DIR / "static"
 DEFAULT_INDEX_PATH = SCRIPT_DIR / "dataset" / "motion_index.jsonl"
 DEFAULT_CACHE_ROOT = SCRIPT_DIR / "cache" / "models"
 DEFAULT_PREVIEW_ROOT = Path("/mnt/nas/cy/humanmotion/multimotion_previews")
-DEFAULT_CACHE_MAX_GIB = 12.0
+DEFAULT_TEMP_MODEL_ROOT = Path(tempfile.gettempdir()) / "multimotion_glb"
 DEFAULT_MODEL_DIR = MULTIMOTION_DIR / "models" / "smplh"
 DEFAULT_SMPLX_MODEL_DIR = MULTIMOTION_DIR / "models" / "smplx"
 DEFAULT_CONVERTER_ENV = "sam2dam2"
@@ -531,23 +532,11 @@ class MotionIndex:
 
     def get_summary(self) -> dict[str, Any]:
         dataset_counts = Counter(entry.dataset for entry in self.entries)
-        cached_dataset_counts = Counter(entry.dataset for entry in self.entries if entry.cache_glb.is_file())
-        cached_count = sum(cached_dataset_counts.values())
         return {
             "entry_count": len(self.entries),
             "dataset_counts": dict(sorted(dataset_counts.items())),
-            "cached_model_count": cached_count,
-            "cached_dataset_counts": dict(sorted(cached_dataset_counts.items())),
-            "cache_coverage": {
-                dataset: {
-                    "cached": cached_dataset_counts.get(dataset, 0),
-                    "total": total,
-                    "ratio": round(cached_dataset_counts.get(dataset, 0) / max(total, 1), 4),
-                }
-                for dataset, total in sorted(dataset_counts.items())
-            },
             "index_path": str(self.source_path),
-            "cache_root": str(self.cache_root),
+            "preview_root": str(DEFAULT_PREVIEW_ROOT),
         }
 
     def get_entry(self, object_id: str) -> MotionEntry | None:
@@ -708,46 +697,35 @@ def convert_entry_to_glb(
         raise RuntimeError(details)
 
 
-def ensure_cached_glb(
+def create_temporary_glb(
     entry: MotionEntry,
     *,
-    lock: threading.Lock,
     model_dir: Path,
     frame_step: int,
     interx_fps: float,
     converter_env: str | None,
     conda_exe: str,
+    temp_root: Path,
     converter=convert_entry_to_glb,
-    manifest: CacheManifest | None = None,
-) -> tuple[Path, bool]:
-    if entry.cache_glb.is_file():
-        if manifest is not None:
-            manifest.record(entry.cache_glb, object_id=entry.object_id, dataset=entry.dataset, hit=True)
-        return entry.cache_glb, False
-    with lock:
-        if entry.cache_glb.is_file():
-            if manifest is not None:
-                manifest.record(entry.cache_glb, object_id=entry.object_id, dataset=entry.dataset, hit=True)
-                return entry.cache_glb, False
-        entry.cache_glb.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = entry.cache_glb.with_name(f"{entry.cache_glb.name}.tmp.{os.getpid()}.{threading.get_ident()}")
-        try:
-            converter(
-                entry,
-                tmp_path,
-                model_dir=model_dir,
-                frame_step=frame_step,
-                interx_fps=interx_fps,
-                converter_env=converter_env,
-                conda_exe=conda_exe,
-            )
-            os.replace(tmp_path, entry.cache_glb)
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        if manifest is not None:
-            manifest.record(entry.cache_glb, object_id=entry.object_id, dataset=entry.dataset, checksum=True)
-        return entry.cache_glb, True
+) -> tuple[Path, Path]:
+    """Convert one motion into a request-scoped GLB directory."""
+    temp_root.mkdir(parents=True, exist_ok=True)
+    job_dir = Path(tempfile.mkdtemp(prefix=f"{entry.object_id[:12]}-", dir=temp_root))
+    output_path = job_dir / f"{entry.object_id}.glb"
+    try:
+        converter(
+            entry,
+            output_path,
+            model_dir=model_dir,
+            frame_step=frame_step,
+            interx_fps=interx_fps,
+            converter_env=converter_env,
+            conda_exe=conda_exe,
+        )
+        return output_path, job_dir
+    except BaseException:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
 
 
 class MotionQueryServer(ThreadingHTTPServer):
@@ -767,12 +745,11 @@ class MotionQueryServer(ThreadingHTTPServer):
         translation_model: str | None = None,
         translation_device: int = DEFAULT_LOCAL_TRANSLATION_DEVICE,
         translation_max_length: int = DEFAULT_LOCAL_TRANSLATION_MAX_LENGTH,
-        cache_max_gib: float = DEFAULT_CACHE_MAX_GIB,
     ) -> None:
         super().__init__(server_address, request_handler)
         self.motion_index = motion_index
-        self.cache_manifest = CacheManifest(motion_index.cache_root)
-        self.cache_max_bytes = max(0, int(cache_max_gib * 1024**3))
+        self.temp_root = DEFAULT_TEMP_MODEL_ROOT / str(os.getpid())
+        self.temp_root.mkdir(parents=True, exist_ok=True)
         self.model_dir = model_dir
         self.frame_step = frame_step
         self.interx_fps = interx_fps
@@ -817,14 +794,6 @@ class MotionQueryServer(ThreadingHTTPServer):
                     max_length=self.translation_max_length,
                 )
             return self._translator
-
-    def cache_summary(self) -> dict[str, int]:
-        stats = self.cache_manifest.stats()
-        return {
-            "cache_bytes": stats["total_bytes"],
-            "cache_file_count": stats["file_count"],
-            "cache_limit_bytes": self.cache_max_bytes,
-        }
 
 
 class MotionQueryRequestHandler(BaseHTTPRequestHandler):
@@ -942,8 +911,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         limit = clamp_int(first_query_value(query, "limit"), 9, minimum=1, maximum=MAX_PAGE_SIZE)
         offset = clamp_int(first_query_value(query, "offset"), 0, minimum=0)
         dataset_filter = first_query_value(query, "dataset")
-        cached_filter = first_query_value(query, "cached")
-        sort_key = first_query_value(query, "sort") or "cached_first"
+        sort_key = first_query_value(query, "sort") or "relevance"
         search_query = first_query_value(query, "q") or first_query_value(query, "search")
         node_filter = first_query_value(query, "node_id") or first_query_value(query, "taxonomy_node")
         include_descendants = parse_bool(first_query_value(query, "include_descendants"), True)
@@ -974,11 +942,6 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         rows: list[tuple[MotionEntry, float | None, dict[str, Any]]] = []
         for entry, score in scored_entries:
             if dataset_filter and entry.dataset != dataset_filter.strip().lower():
-                continue
-            cached = entry.cache_glb.is_file()
-            if cached_filter in {"1", "true", "yes"} and not cached:
-                continue
-            if cached_filter in {"0", "false", "no"} and cached:
                 continue
             classification = motion_taxonomy.classify_motion(entry)
             taxonomy = classification["taxonomy"]
@@ -1021,25 +984,22 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 "filters": {
                     "q": search_query,
                     "dataset": dataset_filter,
-                    "cached": cached_filter,
                     "node_id": node_filter,
                     "include_descendants": include_descendants,
                     **{axis: value for axis, value in axis_filters.items() if value},
                 },
                 "sort": sort_key,
-                "summary": {**self.server.motion_index.get_summary(), **self.server.cache_summary()},
+                "summary": self.server.motion_index.get_summary(),
             },
         )
 
     def _build_library_facets(self, rows: list[tuple[MotionEntry, float | None, dict[str, Any]]]) -> dict[str, dict[str, int]]:
         facets: dict[str, Counter[str]] = {axis: Counter() for axis in motion_taxonomy.AXIS_ORDER}
         facets["dataset"] = Counter()
-        facets["cached"] = Counter()
         facets["action_node"] = Counter()
         facets["action_node_direct"] = Counter()
         for entry, _score, classification in rows:
             facets["dataset"][entry.dataset] += 1
-            facets["cached"]["true" if entry.cache_glb.is_file() else "false"] += 1
             for axis, value in classification["taxonomy"].items():
                 facets[axis][value] += 1
             direct_nodes = {str(node["id"]) for node in classification.get("action_nodes") or ()}
@@ -1063,8 +1023,6 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             return sorted(rows, key=lambda item: (item[0].dataset, item[0].motion_id))
         if sort_key == "frame_count_desc":
             return sorted(rows, key=lambda item: (-(item[0].frame_count or 0), item[0].dataset, item[0].motion_id))
-        if sort_key == "cached_first":
-            return sorted(rows, key=lambda item: (not item[0].cache_glb.is_file(), item[0].dataset, item[0].motion_id))
         if any(score is not None for _entry, score, _classification in rows):
             return sorted(rows, key=lambda item: (-(item[1] or 0.0), item[0].dataset, item[0].motion_id))
         return sorted(rows, key=lambda item: (item[0].dataset, item[0].motion_id))
@@ -1333,7 +1291,8 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         legacy_download_path = f"/models/{entry.object_id}"
         rest_download_path = f"{API_PREFIX}/models/{entry.object_id}"
         preview_path = self._preview_path_for(entry)
-        preview_download_path = f"{API_PREFIX}/previews/{entry.object_id}.png"
+        preview_available = preview_path.is_file() or preview_path.with_suffix(".png").is_file()
+        preview_download_path = f"{API_PREFIX}/previews/{entry.object_id}.webp"
         payload: dict[str, Any] = {
             "object_id": entry.object_id,
             "dataset": entry.dataset,
@@ -1343,11 +1302,8 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "frame_count": entry.frame_count,
             "source_motion": str(entry.source_motion),
             "caption_file": str(entry.caption_file),
-            "cache_glb": str(entry.cache_glb),
-            "cached": entry.cache_glb.is_file(),
-            "model_relative_path": safe_relative_path(entry.cache_glb, self.server.motion_index.cache_root),
             "preview": {
-                "available": preview_path.is_file(),
+                "available": preview_available,
                 "download_path": preview_download_path,
                 "download_url": self._absolute_url(preview_download_path),
             },
@@ -1355,7 +1311,6 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "track_name": entry.motion_id,
             "action_name": entry.description,
             "source_glb": str(entry.source_motion),
-            "out_glb": str(entry.cache_glb),
             "frame_start": None,
             "frame_end": None,
             "has_icon": False,
@@ -1385,29 +1340,34 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 "download_path": legacy_download_path,
                 "rest_download_path": rest_download_path,
                 "download_url": self._absolute_url(rest_download_path),
-                "filename": entry.cache_glb.name,
-                "available": entry.cache_glb.is_file(),
+                "filename": f"{Path(entry.motion_id).name or entry.object_id}.glb",
+                "available": True,
                 "lazy": True,
             }
         return payload
 
     def _preview_path_for(self, entry: MotionEntry) -> Path:
-        return DEFAULT_PREVIEW_ROOT / entry.dataset / f"{entry.motion_id}.png"
+        return DEFAULT_PREVIEW_ROOT / entry.dataset / f"{entry.motion_id}.webp"
 
     def _handle_preview_download(self, preview_id: str) -> None:
-        object_id = preview_id[:-4] if preview_id.endswith(".png") else preview_id
+        suffix = ".webp" if preview_id.endswith(".webp") else ".png" if preview_id.endswith(".png") else ""
+        object_id = preview_id[: -len(suffix)] if suffix else preview_id
         entry = self.server.motion_index.get_entry(object_id)
         if entry is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Unknown object_id: {object_id}")
             return
         preview_path = self._preview_path_for(entry)
         if not preview_path.is_file():
+            legacy_path = preview_path.with_suffix(".png")
+            if legacy_path.is_file():
+                preview_path = legacy_path
+        if not preview_path.is_file():
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Preview is not available: {object_id}")
             return
         data = preview_path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
-        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Type", "image/webp" if preview_path.suffix == ".webp" else "image/png")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -1417,41 +1377,48 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         if entry is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Unknown object_id: {object_id}")
             return
-        try:
-            model_path, generated = ensure_cached_glb(
-                entry,
-                lock=self.server.conversion_lock_for(entry.object_id),
-                model_dir=self.server.model_dir,
-                frame_step=self.server.frame_step,
-                interx_fps=self.server.interx_fps,
-                converter_env=self.server.converter_env,
-                conda_exe=self.server.conda_exe,
-                manifest=self.server.cache_manifest,
-            )
-        except KeyboardInterrupt:
-            raise
-        except SystemExit as exc:
-            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"Failed to convert motion to GLB: {exc}")
-            return
-        except Exception as exc:
-            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"Failed to convert motion to GLB: {exc}")
-            return
-        file_size = model_path.stat().st_size
-        self.send_response(HTTPStatus.OK)
-        self._send_cors_headers()
-        self.send_header("Content-Type", MODEL_CONTENT_TYPE)
-        self.send_header("Content-Length", str(file_size))
-        self.send_header("Content-Disposition", f'attachment; filename="{model_path.name}"')
-        self.send_header("X-Multimotion-Generated", "true" if generated else "false")
-        self.end_headers()
-        with model_path.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-        if self.server.cache_max_bytes:
-            self.server.cache_manifest.prune(max_bytes=self.server.cache_max_bytes)
+        with self.server.conversion_lock_for(entry.object_id):
+            job_dir: Path | None = None
+            response_started = False
+            try:
+                model_path, job_dir = create_temporary_glb(
+                    entry,
+                    model_dir=self.server.model_dir,
+                    frame_step=self.server.frame_step,
+                    interx_fps=self.server.interx_fps,
+                    converter_env=self.server.converter_env,
+                    conda_exe=self.server.conda_exe,
+                    temp_root=self.server.temp_root,
+                )
+                file_size = model_path.stat().st_size
+                self.send_response(HTTPStatus.OK)
+                self._send_cors_headers()
+                self.send_header("Content-Type", MODEL_CONTENT_TYPE)
+                self.send_header("Content-Length", str(file_size))
+                filename = f"{Path(entry.motion_id).name or entry.object_id}.glb"
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("X-Multimotion-Generated", "true")
+                self.end_headers()
+                response_started = True
+                with model_path.open("rb") as handle:
+                    while True:
+                        chunk = handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except KeyboardInterrupt:
+                raise
+            except SystemExit as exc:
+                if not response_started:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"Failed to convert motion to GLB: {exc}")
+            except Exception as exc:
+                if not response_started:
+                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"Failed to convert motion to GLB: {exc}")
+            finally:
+                if job_dir is not None:
+                    shutil.rmtree(job_dir, ignore_errors=True)
 
     def _build_root_payload(self) -> dict[str, Any]:
         summary = self.server.motion_index.get_summary()
@@ -1473,7 +1440,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 "entry_detail": f"{API_PREFIX}/entries/{{object_id}}",
                 "searches": f"{API_PREFIX}/searches",
                 "model_download": f"{API_PREFIX}/models/{{object_id}}",
-                "preview_download": f"{API_PREFIX}/previews/{{object_id}}.png",
+                "preview_download": f"{API_PREFIX}/previews/{{object_id}}.webp",
             },
             "legacy_routes": {"query": "/query", "model_download": "/models/{object_id}"},
         }
@@ -1484,10 +1451,8 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "status": "ok",
             "entry_count": summary["entry_count"],
             "dataset_counts": summary["dataset_counts"],
-            "cached_model_count": summary["cached_model_count"],
-            **self.server.cache_summary(),
             "index_path": summary["index_path"],
-            "cache_root": summary["cache_root"],
+            "preview_root": summary["preview_root"],
             "lazy_conversion": True,
             "translation": {
                 "enabled": bool(self.server.translation_model or self.server.translation_url),
@@ -1515,7 +1480,10 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 f"{API_PREFIX}/entries/{{object_id}}": {"get": {"summary": "Fetch one motion entry"}},
                 f"{API_PREFIX}/searches": {"post": {"summary": "Run text search without GLB conversion"}},
                 f"{API_PREFIX}/models/{{object_id}}": {
-                    "get": {"summary": "Convert the selected motion to GLB if needed, then download it"}
+                    "get": {"summary": "Convert the selected motion to a temporary GLB, then download it"}
+                },
+                f"{API_PREFIX}/previews/{{object_id}}.webp": {
+                    "get": {"summary": "Download the static WebP motion thumbnail"}
                 },
             },
         }
@@ -1620,8 +1588,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve the multimotion lazy retrieval API.")
     parser.add_argument("--index", default=str(DEFAULT_INDEX_PATH), help=f"Motion index JSONL. Default: {DEFAULT_INDEX_PATH}")
-    parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_ROOT), help=f"GLB cache root. Default: {DEFAULT_CACHE_ROOT}")
-    parser.add_argument("--cache-max-gib", type=float, default=DEFAULT_CACHE_MAX_GIB, help="Maximum total GLB cache size in GiB; 0 disables automatic pruning.")
+    parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_ROOT), help="Legacy index path mapping only; the API never writes GLB files here.")
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR), help=f"SMPL-H model directory. Default: {DEFAULT_MODEL_DIR}")
     parser.add_argument(
         "--converter-env",
@@ -1690,7 +1657,6 @@ def main() -> None:
         translation_model=args.translation_model,
         translation_device=args.translation_device,
         translation_max_length=args.translation_max_length,
-        cache_max_gib=args.cache_max_gib,
     )
     example_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     print(
@@ -1700,7 +1666,8 @@ def main() -> None:
                 "host": args.host,
                 "port": args.port,
                 "index_path": str(index_path),
-                "cache_root": str(cache_root),
+                "preview_root": str(DEFAULT_PREVIEW_ROOT),
+                "temporary_model_root": str(server.temp_root),
                 "model_dir": str(model_dir),
                 "converter_env": converter_env,
                 "conda_exe": args.conda_exe,

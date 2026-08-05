@@ -5,10 +5,13 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUTPUT_ROOT=${OUTPUT_ROOT:-/mnt/nas/cy/humanmotion/multimotion_previews}
 WIDTH=${WIDTH:-384}
 HEIGHT=${HEIGHT:-240}
+QUALITY=${QUALITY:-80}
+WORKERS=${WORKERS:-8}
 DATASET=${DATASET:-all}
 PORT=${PORT:-7192}
 CONVERTER_ENV=${CONVERTER_ENV:-sam2dam2}
 CONDA_EXE=${CONDA_EXE:-conda}
+PYTHON_BIN=${PYTHON_BIN:-/data1/cy/anaconda3/bin/python}
 LOG_FILE=${LOG_FILE:-$OUTPUT_ROOT/generate_all_previews.log}
 PID_FILE=${PID_FILE:-$OUTPUT_ROOT/generate_all_previews.pid}
 
@@ -25,12 +28,14 @@ fi
 
 cd "$SCRIPT_DIR"
 
-nohup python generate_motion_previews.py \
+nohup "$PYTHON_BIN" generate_motion_previews.py \
   --output-root "$OUTPUT_ROOT" \
   --width "$WIDTH" \
   --height "$HEIGHT" \
+  --quality "$QUALITY" \
+  --workers "$WORKERS" \
+  --skip-migration \
   --dataset "$DATASET" \
-  --include-uncached \
   --converter-env "$CONVERTER_ENV" \
   --conda-exe "$CONDA_EXE" \
   --port "$PORT" \

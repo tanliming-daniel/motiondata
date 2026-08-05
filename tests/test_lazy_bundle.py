@@ -1,41 +1,19 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from urllib.request import urlopen
 
 import build_motion_index
-from cache_manifest import CacheManifest
 import local_motion_query_api
 import motion_taxonomy
 
 
 class LazyBundleTests(unittest.TestCase):
-    def test_cache_manifest_prunes_oldest_files_to_byte_limit(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "models"
-            manifest = CacheManifest(root)
-            try:
-                first = root / "interhuman" / "first.glb"
-                second = root / "motionxpp" / "second.glb"
-                first.parent.mkdir(parents=True)
-                second.parent.mkdir(parents=True)
-                first.write_bytes(b"1234")
-                second.write_bytes(b"5678")
-                manifest.record(first, object_id="first", dataset="interhuman")
-                time.sleep(0.01)
-                manifest.record(second, object_id="second", dataset="motionxpp")
-                removed = manifest.prune(max_bytes=4)
-                self.assertEqual(removed, [first])
-                self.assertFalse(first.exists())
-                self.assertTrue(second.exists())
-            finally:
-                manifest.close()
-
     def test_read_captions_keeps_non_empty_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "1.txt"
@@ -102,7 +80,7 @@ class LazyBundleTests(unittest.TestCase):
             self.assertEqual(result[0][1].dataset, "interhuman")
             self.assertEqual(result[0][1].motion_id, "1")
 
-    def test_ensure_cached_glb_is_lazy_and_reuses_cache(self) -> None:
+    def test_temporary_glb_is_generated_without_persistent_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             source = tmp_path / "1.pkl"
@@ -127,31 +105,20 @@ class LazyBundleTests(unittest.TestCase):
                 output_path.write_bytes(b"glb")
 
             self.assertFalse(entry.cache_glb.exists())
-            path, generated = local_motion_query_api.ensure_cached_glb(
+            path, job_dir = local_motion_query_api.create_temporary_glb(
                 entry,
-                lock=threading.Lock(),
                 model_dir=tmp_path,
                 frame_step=1,
                 interx_fps=30.0,
                 converter_env=None,
                 conda_exe="conda",
+                temp_root=tmp_path / "temporary-models",
                 converter=fake_converter,
             )
-            self.assertTrue(generated)
             self.assertEqual(path.read_bytes(), b"glb")
-
-            path, generated = local_motion_query_api.ensure_cached_glb(
-                entry,
-                lock=threading.Lock(),
-                model_dir=tmp_path,
-                frame_step=1,
-                interx_fps=30.0,
-                converter_env=None,
-                conda_exe="conda",
-                converter=fake_converter,
-            )
-            self.assertFalse(generated)
             self.assertEqual(len(calls), 1)
+            self.assertFalse(entry.cache_glb.exists())
+            shutil.rmtree(job_dir)
 
     def test_merge_search_text_deduplicates_alias_tokens(self) -> None:
         merged = local_motion_query_api.merge_search_text("Shake hands.", ["shake", "hand"])
@@ -448,6 +415,8 @@ class LazyBundleTests(unittest.TestCase):
                 library = json.loads(urlopen(base_url + "/api/v1/library?activity_domain=social", timeout=5).read().decode("utf-8"))
                 self.assertEqual(library["total"], 1)
                 self.assertEqual(library["items"][0]["object_id"], "obj1")
+                self.assertNotIn("cached", library["items"][0])
+                self.assertTrue(library["items"][0]["preview"]["download_url"].endswith(".webp"))
                 self.assertEqual(library["items"][0]["taxonomy"]["activity_domain"], "social")
                 by_node = json.loads(urlopen(base_url + "/api/v1/library?node_id=etiquette_handshake", timeout=5).read().decode("utf-8"))
                 self.assertEqual(by_node["total"], 1)

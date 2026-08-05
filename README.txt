@@ -1,7 +1,7 @@
 Multimotion Lazy Retrieval Bundle
 
 这是一个“先检索、后按需转 GLB”的服务包。
-它不会把全部模型预先展开，而是先用 caption 建索引，命中后再把对应 motion 转成 GLB 并缓存起来。
+它先用 caption 建索引，列表使用 NAS 上的静态 WebP 缩略图；只有播放或下载时才临时生成 GLB，响应结束后立即删除。
 当前支持 InterHuman、InterX 和 Motion-X++。Motion-X++ 使用 `models/smplx/SMPLX_NEUTRAL.npz`，
 首次下载时按需生成带 55 关节骨架和 50 个表情 morph targets 的 GLB。
 
@@ -14,7 +14,7 @@ API 现在会优先对短中文关键词直接走 alias，对较长中文描述�
 - `query_api_client.py`: 查询并下载模型的客户端。
 - `build_motion_index.py`: 重新生成 `dataset/motion_index.jsonl`。
 - `build_taxonomy_assignments.py`: 使用可追溯规则预计算动作分类映射和覆盖报告。
-- `precache_motionxpp.py`: 按数量上限和磁盘保留空间批量预缓存 Motion-X++ GLB。
+- `generate_motion_previews.py`: 生成可断点续跑的全量静态 WebP 缩略图。
 - `taxonomy/catalog.json`: 版本化的中英双语动作目录、别名和来源引用。
 - `taxonomy/sources.json`: WHO ICF、FIG、O*NET、ISCO 等分类来源元数据。
 - `start_api_server.sh`: 启动本地 API，默认端口 `7091`。
@@ -22,7 +22,7 @@ API 现在会优先对短中文关键词直接走 alias，对较长中文描述�
 - `requirements.txt`: 搜索本身依赖说明。
 - `requirements_translation.txt`: 进程内中文翻译所需依赖。
 - `dataset/motion_index.jsonl`: 当前索引。
-- `cache/models/`: 下载后生成的 GLB 缓存。
+- `/mnt/nas/cy/humanmotion/multimotion_previews/`: 长期保存的 WebP 缩略图。
 
 ## 先理解怎么用
 
@@ -276,13 +276,13 @@ python3 build_taxonomy_assignments.py
 
 分类过程不调用生成式模型。它使用完整短语、词边界、词形归一和规则优先级；无法可靠识别的素材会保持未分类。
 
-Motion-X++ GLB 较大，推荐使用受限批量预缓存：
+全量生成静态缩略图：
 
 ```bash
-python3 precache_motionxpp.py --limit 100 --reserve-gib 20
+/data1/cy/anaconda3/bin/python generate_motion_previews.py --dataset all --workers 8
 ```
 
-脚本只生成缺失文件，达到目标数量或剩余空间低于保留阈值就停止；单个动作仍可通过播放或下载接口按需生成。
+脚本会跳过已有 WebP，失败项会记录并可重复执行；生成过程中使用临时 GLB，任务结束后不会留下模型缓存。
 
 ## 分类目录 API
 
