@@ -10,26 +10,30 @@
 </head>
 <body>
   <header class="app-header">
-    <div>
+    <div class="brand-block">
       <p class="eyebrow">LOCAL MOTION ATLAS</p>
       <h1>Multimotion 动作库</h1>
     </div>
+    <label class="global-search" for="searchInput">
+      <span aria-hidden="true">⌕</span>
+      <input id="searchInput" type="search" autocomplete="off" placeholder="搜索动作，例如：握手、瑜伽、walk">
+    </label>
     <div class="header-meta">
       <span id="statusBadge" class="status-pill">读取中</span>
+      <button id="filterToggle" class="toolbar-button" type="button" aria-controls="filtersPanel" aria-expanded="true">筛选</button>
       <a href="/api/v1/health" target="_blank" rel="noopener">API</a>
     </div>
   </header>
 
   <main class="workspace">
-    <aside class="filters" aria-label="动作筛选">
+    <aside id="filtersPanel" class="filters" aria-label="动作筛选">
       <div class="filter-title">
         <div><p class="eyebrow">FILTER</p><h2>分类检索</h2></div>
-        <button id="clearFilters" type="button">清空</button>
+        <div class="filter-title-actions">
+          <button id="clearFilters" type="button">清空</button>
+          <button id="closeFilters" class="icon-button mobile-only" type="button" aria-label="关闭筛选">×</button>
+        </div>
       </div>
-      <label class="search-box" for="searchInput">
-        <span>文本搜索</span>
-        <input id="searchInput" type="search" autocomplete="off" placeholder="握手、拥抱、walk、basketball">
-      </label>
       <section>
         <h3>数据集</h3>
         <div id="datasetFilters" class="chip-row"></div>
@@ -40,7 +44,7 @@
     <section class="results" aria-live="polite">
       <div class="results-head">
         <div><p class="eyebrow">SEARCH RESULTS</p><h2 id="resultTitle">动作结果</h2></div>
-        <label>排序
+        <label class="sort-control"><span>排序</span>
           <select id="sortSelect">
             <option value="relevance" selected>相关度</option>
             <option value="motion_id">Motion ID</option>
@@ -48,6 +52,7 @@
           </select>
         </label>
       </div>
+      <div id="activeFilters" class="active-filters hidden" aria-label="当前筛选条件"></div>
       <section id="taxonomyDetail" class="taxonomy-detail hidden" aria-live="polite"></section>
       <div id="resultGrid" class="result-grid"><article class="empty">正在读取动作索引...</article></div>
       <div id="pager" class="pager hidden">
@@ -57,16 +62,24 @@
       </div>
     </section>
 
-    <aside class="viewer-panel" aria-label="GLB 预览">
+  </main>
+
+  <button id="filterScrim" class="scrim filter-scrim" type="button" aria-label="关闭筛选"></button>
+  <button id="viewerScrim" class="scrim viewer-scrim" type="button" aria-label="关闭动作详情"></button>
+
+  <aside id="viewerDrawer" class="viewer-drawer" role="dialog" aria-modal="true" aria-label="动作详情" aria-hidden="true" inert>
       <div class="viewer-head">
-        <div><p class="eyebrow">GLB PREVIEW</p><h2 id="viewerTitle">选择一个动作</h2></div>
-        <a id="downloadLink" class="download-link disabled" href="#">下载</a>
+        <div><p class="eyebrow">MOTION DETAIL</p><h2 id="viewerTitle">动作详情</h2></div>
+        <button id="closeViewer" class="icon-button" type="button" aria-label="关闭动作详情">×</button>
       </div>
-      <div id="viewerStatus" class="viewer-status">列表使用 WebP 缩略图；点击“播放完整”后临时生成 3D 动作。</div>
+      <div id="viewerStatus" class="viewer-status">选择动作后生成可交互的 3D 预览。</div>
       <div id="viewerCanvas" class="viewer-canvas"></div>
       <div id="viewerMeta" class="viewer-meta"></div>
-    </aside>
-  </main>
+      <div class="viewer-actions">
+        <button id="retryViewer" class="secondary-button hidden" type="button">重试</button>
+        <a id="downloadLink" class="download-link disabled" href="#">下载 GLB</a>
+      </div>
+  </aside>
 
   <script type="module" src="/ui/static/motion_library.js"></script>
 </body>

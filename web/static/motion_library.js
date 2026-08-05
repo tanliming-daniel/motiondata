@@ -1,11 +1,12 @@
 import * as THREE from "/ui/static/vendor/three.module.js";
 import { GLTFLoader } from "/ui/static/vendor/GLTFLoader.js";
 
-const state = { offset: 0, limit: 9, total: 0, taxonomy: [], taxonomyNodes: [], taxonomySources: [], taxonomyQuery: "", expandedNodes: new Set(), hierarchy: [], facets: {}, filters: {}, items: [] };
+const state = { offset: 0, limit: 24, total: 0, taxonomy: [], taxonomyNodes: [], taxonomySources: [], taxonomyQuery: "", expandedNodes: new Set(), hierarchy: [], facets: {}, filters: {}, items: [] };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 
 let renderer, scene, camera, mixer, clock, animationFrame, currentObject, currentFixedFront = false;
+let currentBlobUrl, currentItem, viewerAbortController, viewerRequestId = 0, lastViewerTrigger;
 
 function isMotionXppDataset(value) {
   const normalized = String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -127,16 +128,35 @@ function renderDatasetFilters() {
   }));
 }
 
-function tagsFor(item) {
+function filterLabel(key, value) {
+  if (key === "dataset") return value;
+  if (key === "node_id") return state.taxonomyNodes.find((node) => node.id === value)?.zh_cn || value;
+  const axis = state.taxonomy.find((item) => item.key === key);
+  return axis?.values?.find((item) => item.key === value)?.label || value;
+}
+
+function renderActiveFilters() {
+  const root = $("#activeFilters");
+  const filters = Object.entries(state.filters).filter(([, value]) => Boolean(value));
+  root.classList.toggle("hidden", filters.length === 0);
+  root.innerHTML = filters.map(([key, value]) => `<button class="active-filter" type="button" data-remove-filter="${escapeHtml(key)}">${escapeHtml(filterLabel(key, value))}</button>`).join("");
+  root.querySelectorAll("[data-remove-filter]").forEach((button) => button.addEventListener("click", () => {
+    state.filters[button.dataset.removeFilter] = "";
+    state.offset = 0;
+    loadLibrary();
+  }));
+}
+
+function tagsFor(item, { interactive = true, limit = 3 } = {}) {
   const labels = item.taxonomy_labels || {};
-  const actionNodes = (item.action_nodes || []).slice(0, 3).map((node) => `<button class="tag action-tag" type="button" data-card-node-id="${escapeHtml(node.id)}">${escapeHtml(node.label)}</button>`).join("");
-  return [
-    actionNodes,
-    `<span class="tag domain">${escapeHtml(labels.action_category || "其他动作")}</span>`,
-    `<span class="tag">${escapeHtml(labels.action_tag || "其他动作")}</span>`,
-    `<span class="tag">${escapeHtml(labels.participants || "未知")}</span>`,
-    `<span class="tag">${escapeHtml(labels.space || "未说明")}</span>`,
-  ].join("");
+  const values = [
+    ...(item.action_nodes || []).map((node) => ({ label: node.label, id: node.id, domain: true })),
+    { label: labels.participants || "未知" },
+    { label: labels.space || "未说明" },
+  ].slice(0, limit);
+  return values.map((value) => interactive && value.id
+    ? `<button class="tag action-tag${value.domain ? " domain" : ""}" type="button" data-card-node-id="${escapeHtml(value.id)}">${escapeHtml(value.label)}</button>`
+    : `<span class="tag${value.domain ? " domain" : ""}">${escapeHtml(value.label)}</span>`).join("");
 }
 
 function renderCards(items) {
@@ -148,57 +168,51 @@ function renderCards(items) {
   root.innerHTML = items.map((item, index) => {
     const model = item.model || {};
     const frames = item.frame_count ? `${Number(item.frame_count).toLocaleString()} 帧` : "帧数未知";
+    const previewUrl = item.preview?.download_path || item.preview?.download_url;
+    const preview = item.preview?.available && previewUrl
+      ? `<img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(item.motion_id)} 动作缩略图" loading="lazy">`
+      : "<span>暂无缩略图</span>";
+    const modelUrl = model.rest_download_path || model.download_path || model.download_url || "#";
     return `<article class="motion-card">
-      <div class="card-preview" data-card-preview="${index}"><span>${item.preview?.available ? "读取预览" : "暂无缩略图"}</span></div>
+      <button class="card-preview" type="button" data-preview-index="${index}" aria-label="播放 ${escapeHtml(item.motion_id)}">${preview}</button>
       <div class="card-body">
-        <div class="card-top"><span>${escapeHtml(item.dataset)} · ${escapeHtml(item.motion_id)}</span><span>WebP 缩略图</span></div>
+        <div class="card-top"><span class="dataset-mark">${escapeHtml(item.dataset)}</span><span>${escapeHtml(item.motion_id)}</span></div>
         <h3>${escapeHtml(item.description || item.motion_id)}</h3>
-        <p class="description">${escapeHtml((item.captions || []).join(" / "))}</p>
-        <div class="tags">${tagsFor(item)}<span class="tag">${frames}</span></div>
+        <div class="tags">${tagsFor(item, { limit: 2 })}<span class="tag">${frames}</span></div>
         <div class="card-actions">
-          <button type="button" data-preview-index="${index}">播放完整</button>
-          <a href="${escapeHtml(model.download_url || "#")}" target="_blank" rel="noopener">下载 GLB</a>
+          <button class="play-button" type="button" data-preview-index="${index}">播放 3D</button>
+          <a href="${escapeHtml(modelUrl)}" target="_blank" rel="noopener">下载</a>
         </div>
       </div>
     </article>`;
   }).join("");
   root.querySelectorAll("[data-preview-index]").forEach((button) => button.addEventListener("click", () => previewItem(items[Number(button.dataset.previewIndex)])));
   root.querySelectorAll("[data-card-node-id]").forEach((button) => button.addEventListener("click", () => selectTaxonomyNode(button.dataset.cardNodeId)));
-  renderCardPreviews(items);
-}
-
-const cardPreviewQueue = { running: 0, jobs: [] };
-
-function renderCardPreviews(items) {
-  cardPreviewQueue.jobs = [];
-  cardPreviewQueue.running = 0;
-  items.forEach((item, index) => {
-    const target = document.querySelector(`[data-card-preview="${index}"]`);
-    if (!target || !item?.preview?.download_url) return;
-    cardPreviewQueue.jobs.push(() => renderOneCardPreview(item, target));
-  });
-  pumpCardPreviewQueue();
-}
-
-function pumpCardPreviewQueue() {
-  while (cardPreviewQueue.running < 2 && cardPreviewQueue.jobs.length) {
-    const job = cardPreviewQueue.jobs.shift();
-    cardPreviewQueue.running += 1;
-    job().catch(() => {}).finally(() => {
-      cardPreviewQueue.running -= 1;
-      pumpCardPreviewQueue();
-    });
-  }
-}
-
-function renderOneCardPreview(item, target) {
-  return new Promise((resolve) => {
-    if (item.preview && item.preview.available && item.preview.download_url) {
-      target.innerHTML = `<img src="${escapeHtml(item.preview.download_url)}" alt="${escapeHtml(item.motion_id)} 预览图" loading="lazy">`;
-      return resolve();
-    }
-    target.innerHTML = "<span>暂无缩略图</span>";
-    resolve();
+  root.querySelectorAll(".card-preview img").forEach((image) => {
+    const showFallback = () => {
+      if (!image.isConnected) return;
+      const fallback = document.createElement("span");
+      fallback.textContent = "缩略图暂不可用";
+      image.replaceWith(fallback);
+    };
+    image.addEventListener("error", showFallback, { once: true });
+    image.addEventListener("load", () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 32;
+        canvas.height = 20;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let nonWhitePixels = 0;
+        for (let offset = 0; offset < pixels.length; offset += 4) {
+          if (pixels[offset] < 220 || pixels[offset + 1] < 220 || pixels[offset + 2] < 220) nonWhitePixels += 1;
+        }
+        if (nonWhitePixels / (pixels.length / 4) < 0.02) showFallback();
+      } catch (_) {
+        // A preview that cannot be sampled can still be displayed normally.
+      }
+    }, { once: true });
   });
 }
 
@@ -247,22 +261,28 @@ function renderPager() {
 }
 
 async function loadLibrary() {
+  $("#resultGrid").setAttribute("aria-busy", "true");
   const params = new URLSearchParams({ limit: String(state.limit), offset: String(state.offset), sort: $("#sortSelect").value });
   Object.entries(state.filters).forEach(([key, value]) => { if (value) params.set(key, value); });
   const search = $("#searchInput").value.trim();
   if (search) params.set("q", search);
-  const payload = await fetchJson(`/api/v1/library?${params}`);
-  state.total = Number(payload.total || 0);
-  state.facets = payload.facets || {};
-  state.hierarchy = payload.hierarchy || state.hierarchy;
-  state.items = payload.items || [];
-  renderCards(state.items);
-  renderDatasetFilters();
-  renderTaxonomyFilters();
-  renderPager();
-  $("#resultTitle").textContent = `动作结果 · ${state.total}`;
-  const summary = payload.summary || {};
-  $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 · WebP 缩略图 · 按需 3D`;
+  try {
+    const payload = await fetchJson(`/api/v1/library?${params}`);
+    state.total = Number(payload.total || 0);
+    state.facets = payload.facets || {};
+    state.hierarchy = payload.hierarchy || state.hierarchy;
+    state.items = payload.items || [];
+    renderCards(state.items);
+    renderDatasetFilters();
+    renderTaxonomyFilters();
+    renderActiveFilters();
+    renderPager();
+    $("#resultTitle").textContent = `动作结果 · ${state.total.toLocaleString()}`;
+    const summary = payload.summary || {};
+    $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 · WebP 缩略图 · 按需 3D`;
+  } finally {
+    $("#resultGrid").removeAttribute("aria-busy");
+  }
 }
 
 function setViewerStatus(text) { $("#viewerStatus").textContent = text; }
@@ -300,6 +320,7 @@ function resizeViewer() {
 }
 
 function animate() {
+  if (!renderer || !scene || !camera) return;
   animationFrame = requestAnimationFrame(animate);
   const delta = clock ? clock.getDelta() : 0;
   if (mixer) mixer.update(delta);
@@ -311,35 +332,115 @@ function fitCamera(object) {
   fitObjectCamera(object, camera, 1.65, currentFixedFront);
 }
 
+function disposeMaterial(material) {
+  Object.values(material || {}).forEach((value) => { if (value?.isTexture) value.dispose(); });
+  material?.dispose?.();
+}
+
+function clearCurrentModel() {
+  if (!currentObject) return;
+  scene?.remove(currentObject);
+  currentObject.traverse((child) => {
+    child.geometry?.dispose?.();
+    if (Array.isArray(child.material)) child.material.forEach(disposeMaterial);
+    else disposeMaterial(child.material);
+  });
+  currentObject = null;
+  mixer = null;
+}
+
+function updateOverlayState() {
+  document.body.classList.toggle("overlay-open", document.body.classList.contains("viewer-open") || document.body.classList.contains("filters-open"));
+}
+
+function openViewer() {
+  if (!document.body.classList.contains("viewer-open")) lastViewerTrigger = document.activeElement;
+  document.body.classList.add("viewer-open");
+  $("#viewerDrawer").setAttribute("aria-hidden", "false");
+  $("#viewerDrawer").inert = false;
+  updateOverlayState();
+  requestAnimationFrame(() => $("#closeViewer").focus());
+}
+
+function closeViewer() {
+  viewerRequestId += 1;
+  viewerAbortController?.abort();
+  viewerAbortController = null;
+  clearCurrentModel();
+  if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+  currentBlobUrl = null;
+  if (animationFrame) cancelAnimationFrame(animationFrame);
+  animationFrame = null;
+  window.removeEventListener("resize", resizeViewer);
+  renderer?.dispose();
+  renderer?.forceContextLoss?.();
+  renderer = scene = camera = clock = null;
+  $("#viewerCanvas").innerHTML = "";
+  $("#downloadLink").classList.add("disabled");
+  $("#downloadLink").removeAttribute("download");
+  document.body.classList.remove("viewer-open");
+  $("#viewerDrawer").setAttribute("aria-hidden", "true");
+  $("#viewerDrawer").inert = true;
+  updateOverlayState();
+  lastViewerTrigger?.focus?.();
+}
+
 async function previewItem(item) {
+  currentItem = item;
+  openViewer();
   ensureViewer();
   $("#viewerTitle").textContent = `${item.dataset} / ${item.motion_id}`;
-  $("#viewerMeta").innerHTML = `<p>${escapeHtml(item.description)}</p><p>${tagsFor(item)}</p>`;
-  const url = item?.model?.download_url;
+  $("#viewerMeta").innerHTML = `<p class="detail-description">${escapeHtml(item.description || item.motion_id)}</p><p class="detail-caption">${escapeHtml((item.captions || []).join(" / "))}</p><div class="tags">${tagsFor(item, { interactive: false, limit: 8 })}</div>`;
+  const url = item?.model?.rest_download_path || item?.model?.download_path || item?.model?.download_url;
   if (!url) { setViewerStatus("这个动作没有可用的 GLB 下载地址。"); return; }
-  $("#downloadLink").href = url;
-  $("#downloadLink").classList.remove("disabled");
+  viewerAbortController?.abort();
+  viewerAbortController = new AbortController();
+  const requestId = ++viewerRequestId;
+  clearCurrentModel();
+  if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+  currentBlobUrl = null;
+  $("#downloadLink").classList.add("disabled");
+  $("#retryViewer").classList.add("hidden");
   setViewerStatus("正在临时生成 GLB，完成后立即清理文件...");
-  const loader = new GLTFLoader();
-  loader.load(url, (gltf) => {
-    if (currentObject) scene.remove(currentObject);
-    currentObject = gltf.scene;
-    currentFixedFront = isMotionXppDataset(item.dataset);
-    scene.add(currentObject);
-    mixer = null;
-    if (gltf.animations && gltf.animations.length) {
-      mixer = new THREE.AnimationMixer(currentObject);
-      gltf.animations.forEach((clip) => mixer.clipAction(clip).play());
-    }
-    fitCamera(currentObject);
-    setViewerStatus(gltf.animations?.length ? "GLB 已加载，动画播放中。" : "GLB 已加载，但没有检测到动画轨道。");
-  }, undefined, (error) => {
-    setViewerStatus(`GLB 加载失败：${error.message || error}`);
-  });
+  try {
+    const response = await fetch(url, { signal: viewerAbortController.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    if (requestId !== viewerRequestId) return;
+    currentBlobUrl = URL.createObjectURL(blob);
+    $("#downloadLink").href = currentBlobUrl;
+    $("#downloadLink").download = `${item.motion_id.split("/").pop() || item.object_id}.glb`;
+    $("#downloadLink").classList.remove("disabled");
+    setViewerStatus("模型已生成，正在准备 3D 场景...");
+    const loader = new GLTFLoader();
+    loader.load(currentBlobUrl, (gltf) => {
+      if (requestId !== viewerRequestId) return;
+      currentObject = gltf.scene;
+      currentFixedFront = isMotionXppDataset(item.dataset);
+      scene.add(currentObject);
+      mixer = null;
+      if (gltf.animations?.length) {
+        mixer = new THREE.AnimationMixer(currentObject);
+        gltf.animations.forEach((clip) => mixer.clipAction(clip).play());
+      }
+      fitCamera(currentObject);
+      setViewerStatus(gltf.animations?.length ? "动画播放中。下载将复用当前模型。" : "模型已加载，但没有检测到动画轨道。");
+    }, undefined, (error) => {
+      if (requestId !== viewerRequestId) return;
+      setViewerStatus(`3D 场景加载失败：${error.message || error}`);
+      $("#retryViewer").classList.remove("hidden");
+    });
+  } catch (error) {
+    if (error.name === "AbortError" || requestId !== viewerRequestId) return;
+    setViewerStatus(`GLB 生成失败：${error.message || error}`);
+    $("#retryViewer").classList.remove("hidden");
+  }
 }
 
 async function boot() {
   try {
+    state.limit = window.matchMedia("(max-width: 620px)").matches ? 12 : 24;
+    syncFilterAccessibility();
     const taxonomy = await fetchJson("/api/v1/taxonomy");
     state.taxonomy = taxonomy.data?.axes || [];
     state.taxonomyNodes = taxonomy.data?.nodes || [];
@@ -352,11 +453,72 @@ async function boot() {
   }
 }
 
+function setFiltersOpen(open) {
+  document.body.classList.toggle("filters-open", open);
+  syncFilterAccessibility();
+  updateOverlayState();
+  if (open) requestAnimationFrame(() => $("#closeFilters").focus());
+  else $("#filterToggle").focus();
+}
+
+function syncFilterAccessibility() {
+  const mobile = window.matchMedia("(max-width: 900px)").matches;
+  const open = document.body.classList.contains("filters-open");
+  $("#filtersPanel").inert = mobile && !open;
+  $("#filterToggle").setAttribute("aria-expanded", String(mobile ? open : !document.body.classList.contains("filters-collapsed")));
+}
+
+function toggleFilters() {
+  if (window.matchMedia("(max-width: 900px)").matches) {
+    setFiltersOpen(!document.body.classList.contains("filters-open"));
+    return;
+  }
+  document.body.classList.toggle("filters-collapsed");
+  $("#filterToggle").setAttribute("aria-expanded", String(!document.body.classList.contains("filters-collapsed")));
+}
+
+function pageResults(direction) {
+  state.offset = direction < 0 ? Math.max(0, state.offset - state.limit) : state.offset + state.limit;
+  loadLibrary().then(() => $(".results").scrollIntoView({ behavior: "smooth", block: "start" }));
+}
+
 let searchTimer;
 $("#searchInput").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.offset = 0; loadLibrary(); }, 220); });
 $("#sortSelect").addEventListener("change", () => { state.offset = 0; loadLibrary(); });
-$("#clearFilters").addEventListener("click", () => { state.filters = {}; state.offset = 0; $("#searchInput").value = ""; loadLibrary(); });
-$("#prevPage").addEventListener("click", () => { state.offset = Math.max(0, state.offset - state.limit); loadLibrary(); });
-$("#nextPage").addEventListener("click", () => { state.offset += state.limit; loadLibrary(); });
+$("#clearFilters").addEventListener("click", () => {
+  state.filters = {};
+  state.taxonomyQuery = "";
+  state.offset = 0;
+  $("#searchInput").value = "";
+  loadLibrary();
+});
+$("#prevPage").addEventListener("click", () => pageResults(-1));
+$("#nextPage").addEventListener("click", () => pageResults(1));
+$("#filterToggle").addEventListener("click", toggleFilters);
+$("#closeFilters").addEventListener("click", () => setFiltersOpen(false));
+$("#filterScrim").addEventListener("click", () => setFiltersOpen(false));
+$("#closeViewer").addEventListener("click", closeViewer);
+$("#viewerScrim").addEventListener("click", closeViewer);
+$("#retryViewer").addEventListener("click", () => { if (currentItem) previewItem(currentItem); });
+window.addEventListener("resize", syncFilterAccessibility);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Tab") {
+    const container = document.body.classList.contains("viewer-open")
+      ? $("#viewerDrawer")
+      : document.body.classList.contains("filters-open") ? $("#filtersPanel") : null;
+    if (container) {
+      const focusable = [...container.querySelectorAll('button:not([disabled]), a[href]:not(.disabled), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (first && (!container.contains(document.activeElement) || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last))) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+    }
+  }
+  if (event.key !== "Escape") return;
+  if (document.body.classList.contains("viewer-open")) closeViewer();
+  else if (document.body.classList.contains("filters-open")) setFiltersOpen(false);
+});
 
 boot();
