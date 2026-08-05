@@ -9,16 +9,16 @@
 
 .tree-row {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
+  grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
-  min-height: 36px;
+  min-height: 33px;
   border-bottom: 1px solid #edf1f5;
 }
 
 .tree-toggle,
 .tree-toggle-spacer {
-  width: 26px;
-  height: 30px;
+  width: 24px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -53,10 +53,10 @@
 
 .tree-node {
   width: 100%;
-  min-height: 34px;
+  min-height: 31px;
   border: 0;
   border-radius: 4px;
-  padding: 5px 6px;
+  padding: 4px 5px;
   display: flex;
   align-items: center;
   justify-content: space-between;
