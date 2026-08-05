@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "retrieved_at": "2026-08-04",
+  "sources": [
+    {
+      "id": "dataset_captions",
+      "title": "InterHuman, Inter-X and Motion-X++ caption inventory",
+      "publisher": "Local motion datasets",
+      "version": "motion_index 2026-08-04",
+      "url": null,
+      "license": "Follow each source dataset license",
+      "usage": "Evidence that an observable action exists in the indexed material"
+    },
+    {
+      "id": "who_icf",
+      "title": "International Classification of Functioning, Disability and Health (ICF)",
+      "publisher": "World Health Organization",
+      "version": "ICF",
+      "url": "https://www.who.int/standards/classifications/international-classification-of-functioning-disability-and-health",
+      "license": "Reference only; do not redistribute the source publication",
+      "usage": "Mobility, posture, self-care, domestic life, communication and participation structure"
+    },
+    {
+      "id": "fig_rules",
+      "title": "Gymnastics rules and Codes of Points",
+      "publisher": "International Gymnastics Federation",
+      "version": "2025-2028",
+      "url": "https://www.gymnastics.sport/site/rules/",
+      "license": "Reference only",
+      "usage": "Gymnastics disciplines and standard skill families"
+    },
+    {
+      "id": "ipf_rules",
+      "title": "Technical Rules Book",
+      "publisher": "International Powerlifting Federation",
+      "version": "current rules, retrieved 2026-08-04",
+      "url": "https://www.powerlifting.sport/rules/codes/info/technical-rules",
+      "license": "Reference only",
+      "usage": "Squat, bench press and deadlift terminology"
+    },
+    {
+      "id": "mimo_hs",
+      "title": "Revision of the Hornbostel-Sachs Classification of Musical Instruments",
+      "publisher": "MIMO Consortium",
+      "version": "2011 revision",
+      "url": "https://www.mimo-international.com/",
+      "license": "Reference only",
+      "usage": "Instrument performance families"
+    },
+    {
+      "id": "onet_database",
+      "title": "O*NET Database",
+      "publisher": "U.S. Department of Labor, O*NET Resource Center",
+      "version": "current database, retrieved 2026-08-04",
+      "url": "https://www.onetcenter.org/database.html",
+      "license": "Creative Commons licensed; retain attribution",
+      "usage": "Observable occupation tasks in services, education, health care, engineering, transport and agriculture"
+    },
+    {
+      "id": "isco08",
+      "title": "International Standard Classification of Occupations (ISCO-08)",
+      "publisher": "International Labour Organization",
+      "version": "ISCO-08",
+      "url": "https://www.ilo.org/publications/international-standard-classification-occupations-isco-08",
+      "license": "Reference only",
+      "usage": "Occupation and work-task grouping"
+    },
+    {
+      "id": "isic4",
+      "title": "International Standard Industrial Classification of All Economic Activities",
+      "publisher": "United Nations Statistics Division",
+      "version": "Revision 4",
+      "url": "https://unstats.un.org/unsd/classifications/Econ/isic",
+      "license": "Reference only",
+      "usage": "Industry grouping for manufacturing, transport, food service and agriculture"
+    },
+    {
+      "id": "mesh",
+      "title": "Medical Subject Headings",
+      "publisher": "U.S. National Library of Medicine",
+      "version": "current browser, retrieved 2026-08-04",
+      "url": "https://meshb.nlm.nih.gov/",
+      "license": "Use subject identifiers and concise local descriptions",
+      "usage": "Physical examination, clinical care and physiological action terminology"
+    },
+    {
+      "id": "agrovoc",
+      "title": "AGROVOC Multilingual Thesaurus",
+      "publisher": "Food and Agriculture Organization of the United Nations",
+      "version": "current vocabulary, retrieved 2026-08-04",
+      "url": "https://www.fao.org/agrovoc/",
+      "license": "CC BY 4.0",
+      "usage": "Agriculture, livestock, forestry and fisheries terminology"
+    },
+    {
+      "id": "public_military_doctrine",
+      "title": "Publicly released military task and drill manuals",
+      "publisher": "Official defence publications",
+      "version": "source-specific",
+      "url": null,
+      "license": "Reference only; public observable actions only",
+      "usage": "Generic drill, movement, protection and equipment-operation actions present in the datasets"
+    }
+  ]
+}

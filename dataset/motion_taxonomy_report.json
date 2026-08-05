@@ -1,0 +1,1440 @@
+{
+  "status": "ok",
+  "taxonomy_version": "2026.08-data-first.1",
+  "index_path": "/data5/cy/multimotion/server_bundle_lazy/dataset/motion_index.jsonl",
+  "output_path": "/data5/cy/multimotion/server_bundle_lazy/dataset/motion_taxonomy_assignments.jsonl",
+  "entry_count": 39370,
+  "classified_count": 34384,
+  "unclassified_count": 4986,
+  "unclassified_rate": 0.126645,
+  "datasets": {
+    "interhuman": 2911,
+    "interx": 11359,
+    "motionxpp": 25100
+  },
+  "primary_node_counts": {
+    "locomotion_walk": 4750,
+    "posture_stand": 3867,
+    "posture_sit": 3739,
+    "mind_body_stretch": 1661,
+    "nursing_support": 1584,
+    "etiquette_bow": 1331,
+    "attack_kick": 1114,
+    "sports_ball": 1099,
+    "etiquette_wave": 1068,
+    "posture_lean": 959,
+    "strength_squat": 959,
+    "etiquette_hug": 773,
+    "instrument_percussion": 770,
+    "performance_dance": 762,
+    "defend_block": 648,
+    "etiquette_handshake": 581,
+    "instrument_wind": 538,
+    "locomotion_run": 490,
+    "instrument_string": 485,
+    "locomotion_jump": 473,
+    "mind_body_yoga": 444,
+    "attack_punch": 443,
+    "transition_sit_stand": 416,
+    "sports_water": 326,
+    "eating_food": 284,
+    "social_chat": 266,
+    "etiquette_exchange": 255,
+    "transition_bend": 248,
+    "physio_breathe": 238,
+    "housework_wipe": 213,
+    "sports_winter": 205,
+    "drinking": 199,
+    "housework_sweep": 184,
+    "gym_cartwheel": 157,
+    "office_type": 144,
+    "expression_smile": 143,
+    "construction_hammer": 143,
+    "posture_lie": 136,
+    "office_read": 128,
+    "posture_crouch": 114,
+    "defend_dodge": 108,
+    "locomotion_climb": 108,
+    "drive_vehicle": 106,
+    "housework_laundry": 105,
+    "office_write": 103,
+    "food_knead": 95,
+    "ride_bicycle": 95,
+    "military_salute": 91,
+    "instrument_keyboard": 86,
+    "exam_observe": 80,
+    "vocal_singing": 76,
+    "fishery_catch": 66,
+    "rest_meditation": 63,
+    "conditioning_jump_rope": 62,
+    "gym_somersault": 60,
+    "posture_kneel": 49,
+    "housework_mop": 46,
+    "locomotion_crawl": 41,
+    "fixture_open_door": 35,
+    "defend_restrain": 34,
+    "strength_deadlift": 32,
+    "conditioning_jumping_jack": 31,
+    "physio_cough": 31,
+    "treatment_bandage": 30,
+    "housework_organize": 30,
+    "gym_trampoline": 30,
+    "physio_sneeze": 29,
+    "sports_gymnastics": 29,
+    "prepare_drink": 29,
+    "construction_lift": 28,
+    "conditioning_burpee": 28,
+    "treatment_cpr": 27,
+    "physio_yawn": 27,
+    "games_cards": 27,
+    "posture_cross_legged": 26,
+    "defend_guard": 21,
+    "gym_tumbling": 18,
+    "teach_explain": 10,
+    "expression_frown": 8,
+    "travel_hold_pole": 5,
+    "food_chop": 5,
+    "weapon_fire": 5,
+    "gym_aerobic": 4,
+    "operate_aircraft": 4,
+    "weapon_aim": 4,
+    "social_drink": 3,
+    "gym_acrobatic": 2,
+    "games_billiards": 2,
+    "strength_bench_press": 2,
+    "cook_bake": 2,
+    "fixture_open_window": 2,
+    "cook_boil": 1,
+    "vocal_choir": 1,
+    "teach_board": 1,
+    "cook_stir_fry": 1,
+    "fixture_drawer_cabinet": 1,
+    "farm_harvest": 1,
+    "travel_board_alight": 1
+  },
+  "all_node_counts": {
+    "posture_stand": 13418,
+    "posture_sit": 9811,
+    "locomotion_walk": 8782,
+    "mind_body_stretch": 2832,
+    "posture_lean": 2328,
+    "nursing_support": 2018,
+    "etiquette_bow": 1517,
+    "attack_kick": 1355,
+    "etiquette_wave": 1320,
+    "locomotion_jump": 1293,
+    "sports_ball": 1099,
+    "locomotion_run": 1078,
+    "performance_dance": 1041,
+    "strength_squat": 1035,
+    "instrument_string": 845,
+    "etiquette_hug": 782,
+    "instrument_percussion": 776,
+    "defend_block": 756,
+    "transition_sit_stand": 748,
+    "posture_crouch": 712,
+    "transition_bend": 684,
+    "etiquette_handshake": 583,
+    "instrument_wind": 566,
+    "attack_punch": 547,
+    "physio_breathe": 479,
+    "mind_body_yoga": 466,
+    "sports_water": 447,
+    "social_chat": 404,
+    "housework_wipe": 357,
+    "posture_lie": 344,
+    "etiquette_exchange": 312,
+    "eating_food": 301,
+    "sports_winter": 275,
+    "drinking": 241,
+    "housework_sweep": 238,
+    "posture_kneel": 237,
+    "office_type": 229,
+    "defend_dodge": 200,
+    "office_read": 189,
+    "locomotion_climb": 188,
+    "construction_hammer": 184,
+    "expression_smile": 181,
+    "gym_cartwheel": 157,
+    "drive_vehicle": 152,
+    "office_write": 118,
+    "housework_laundry": 113,
+    "food_knead": 109,
+    "ride_bicycle": 108,
+    "military_salute": 91,
+    "exam_observe": 89,
+    "instrument_keyboard": 86,
+    "defend_guard": 83,
+    "vocal_singing": 77,
+    "rest_meditation": 77,
+    "fishery_catch": 66,
+    "conditioning_jump_rope": 63,
+    "housework_organize": 63,
+    "gym_somersault": 60,
+    "physio_yawn": 58,
+    "posture_cross_legged": 56,
+    "locomotion_crawl": 54,
+    "housework_mop": 47,
+    "gym_trampoline": 41,
+    "construction_lift": 39,
+    "fixture_open_door": 37,
+    "physio_cough": 36,
+    "defend_restrain": 34,
+    "strength_deadlift": 32,
+    "treatment_bandage": 31,
+    "conditioning_jumping_jack": 31,
+    "sports_gymnastics": 31,
+    "physio_sneeze": 30,
+    "prepare_drink": 29,
+    "games_cards": 29,
+    "conditioning_burpee": 28,
+    "treatment_cpr": 27,
+    "gym_tumbling": 18,
+    "teach_explain": 15,
+    "games_billiards": 11,
+    "expression_frown": 8,
+    "gym_acrobatic": 7,
+    "gym_aerobic": 7,
+    "weapon_fire": 6,
+    "travel_hold_pole": 5,
+    "food_chop": 5,
+    "operate_aircraft": 4,
+    "weapon_aim": 4,
+    "social_drink": 3,
+    "strength_bench_press": 2,
+    "cook_bake": 2,
+    "fixture_open_window": 2,
+    "cook_boil": 1,
+    "vocal_choir": 1,
+    "teach_board": 1,
+    "cook_stir_fry": 1,
+    "fixture_drawer_cabinet": 1,
+    "farm_harvest": 1,
+    "travel_board_alight": 1
+  },
+  "legacy_tag_counts": {
+    "basic_locomotion": 15416,
+    "other": 4986,
+    "fitness_training": 4878,
+    "social_etiquette": 4008,
+    "stage_performance": 2718,
+    "medical_care": 1721,
+    "combat_sports": 1557,
+    "housework_labor": 1537,
+    "defense_guard": 811,
+    "physiological_actions": 325,
+    "leisure_recreation": 298,
+    "gymnastics_skills": 271,
+    "transportation_travel": 207,
+    "construction_engineering": 175,
+    "expression_posture": 151,
+    "food_service": 133,
+    "tactical_actions": 91,
+    "agriculture_fishing": 67,
+    "office_learning": 11,
+    "weapons_use": 9
+  },
+  "unclassified_examples": [
+    {
+      "object_id": "dbed0323c71dd8dbdd4e9a8a894c99b9c3199e3cba2bd7a459551bf393b7ef68",
+      "dataset": "interhuman",
+      "motion_id": "28",
+      "description": "one and the other person spin around in circles."
+    },
+    {
+      "object_id": "ffd22e7a915f60cb230a3cb82d010806143752a74ec970c9dfd0f2d470e69486",
+      "dataset": "interhuman",
+      "motion_id": "29",
+      "description": "they are engaged in a game of rock-paper-scissors."
+    },
+    {
+      "object_id": "8336d5e1d9dfea50494b203a7974358d7855fdaa3ea2d17c7b912cbcd1a7e5dd",
+      "dataset": "interhuman",
+      "motion_id": "55",
+      "description": "the first one signals for the second one to pose for a picture, then they both make a \"scissors hand\" gesture with their left hands."
+    },
+    {
+      "object_id": "964248ca7b84c2ae9c3479ef1361a55d5de66f2c46d1bcd4f204694045e554b9",
+      "dataset": "interhuman",
+      "motion_id": "74",
+      "description": "the first one gives the second one a piece of paper. the second one marks it with a stamp. then the first one collects the paper and departs."
+    },
+    {
+      "object_id": "452cd390fb3a2e3fed73859deb46a12bee2fd5648c5b71072e2ecca4ca4cb040",
+      "dataset": "interhuman",
+      "motion_id": "82",
+      "description": "one approaches the other with the product manual trying to pitch his product. the other rudely shoves one aside and strides off."
+    },
+    {
+      "object_id": "76da7b8d8d84d8d365362036847504a00a1f8fdcca1b0d8a95b2042251972df7",
+      "dataset": "interhuman",
+      "motion_id": "94",
+      "description": "two people are facing each other and performing a sequence of movements that includes extending arms and high fiving."
+    },
+    {
+      "object_id": "c30184bc0c1f27854b68997e1cb57be8262cdec933e3968c800614da1822051f",
+      "dataset": "interhuman",
+      "motion_id": "107",
+      "description": "the first person presents his product to the second with the user guide. the second declines by wagging their head negatively and shoving the first person backward. afterwards, the first person strides towards the second calmly."
+    },
+    {
+      "object_id": "2af7275cbbc7677cd66cd403023928f073e761b2750e4711fd152216f95c22e2",
+      "dataset": "interhuman",
+      "motion_id": "143",
+      "description": "one and the other person both greet each other by raising their hands above the head."
+    },
+    {
+      "object_id": "409772eb45f50109eb014814be27742fefa81804926beda7e759be6171cbbd45",
+      "dataset": "interhuman",
+      "motion_id": "189",
+      "description": "one approaches the other while holding his mobile phone, after which they pose together for a group photo."
+    },
+    {
+      "object_id": "84d4182d088ffceabb50a461f9676abb187fb5bb9688531eb3b38a21ac54e23c",
+      "dataset": "interhuman",
+      "motion_id": "194",
+      "description": "one approaches the other while holding a mobile phone, then they both create the \"scissors hand\" gesture - one with their left hand and the other with their right. afterward, they take a photograph together as a group."
+    },
+    {
+      "object_id": "1f711f7ad9fe0d21b5f01933d7f459fc5f55696e82146f009facc2d7655b46eb",
+      "dataset": "interhuman",
+      "motion_id": "203",
+      "description": "the first one tosses a doll to the other person using the right hand, and the other person catches it with ease."
+    },
+    {
+      "object_id": "ac8010ccb4a2c33783deb351e3963f6f5b1db0ce0ffc7bcd17680f8f374d60c4",
+      "dataset": "interhuman",
+      "motion_id": "213",
+      "description": "the two guys are taking turns with a doll."
+    },
+    {
+      "object_id": "488f51bda162ee87ff9690e599fce9c379a3cb50488b748ab47622251ecf07b4",
+      "dataset": "interhuman",
+      "motion_id": "236",
+      "description": "the first one removes a rubber object from their pocket and gives it to the other person."
+    },
+    {
+      "object_id": "bea838ecb152a701d2792b87540e3024d55fc73a1ebde27db7876196000a85c6",
+      "dataset": "interhuman",
+      "motion_id": "239",
+      "description": "the other person pivots and gestures to the content on the blackboard with their right hand, explaining it to one."
+    },
+    {
+      "object_id": "03eb55dca9b3e4e9a0c4d7e5ef958c16603a1344d4488eae3cc991d2cc6eaeab",
+      "dataset": "interhuman",
+      "motion_id": "245",
+      "description": "one lifts the right hand to show approval, and the other moves their neck suddenly."
+    },
+    {
+      "object_id": "cfe285eed96a795393550fb480cbae6890d0486e3f0f369ed9bd975e66e625aa",
+      "dataset": "interhuman",
+      "motion_id": "253",
+      "description": "the first one reaches out with the right hand and taps the wall while the second one claps next to them."
+    },
+    {
+      "object_id": "f0db23ab9d14b8341f5fe0791be28092882623c7e48c8f45962a6a2759882f32",
+      "dataset": "interhuman",
+      "motion_id": "254",
+      "description": "one person twists their torso and taps on the wall, while the other claps next to them."
+    },
+    {
+      "object_id": "77d78843d5f00cb799bf473b40679b8ae07b11541ed84f37817d2ba9b2e8b68e",
+      "dataset": "interhuman",
+      "motion_id": "277",
+      "description": "the first one holds the second one's hand with their right hand, they keep shaking their clasped hands while giving approval with their head."
+    },
+    {
+      "object_id": "8cc2d361cb3c83cb804b00996ab45cb8e87e0e01abfc9898bf2003ad2718acc2",
+      "dataset": "interhuman",
+      "motion_id": "282",
+      "description": "one gazes at the other and endeavors to convince them."
+    },
+    {
+      "object_id": "e976f036f5e19303dd4228fec60dc9940478506cb800dd51f78fa53b7ce97715",
+      "dataset": "interhuman",
+      "motion_id": "287",
+      "description": "two performers step forward while performing marching exercises. they raise their left legs and bend their right arms, then raise their right legs and bend their left arms in a synchronized manner."
+    },
+    {
+      "object_id": "d2f37189fabf4e5084249b34002befc91711d7ea27405517f4c707a1f0285acf",
+      "dataset": "interhuman",
+      "motion_id": "294",
+      "description": "the first person is constantly shoving the second. the second opens their arms to clarify something, and then they both lower their arms and move away from each other."
+    },
+    {
+      "object_id": "24d39b0291b33648a4970d880024ba77b47b65417e358c03d73356f9ff5748bd",
+      "dataset": "interhuman",
+      "motion_id": "297",
+      "description": "one shoves both hands on the other's shoulders while the other continuously moves the arms sideways."
+    },
+    {
+      "object_id": "d9111f9a7f9add327106188a1a98bf8d38c4c67d49ba471c264b2c9a4eecd8a6",
+      "dataset": "interhuman",
+      "motion_id": "303",
+      "description": "these two people are competing in rock-paper-scissors. in the first go, the first one throws the \"scissors\" while the second one throws the \"paper\". in the second round, the first one throws \"paper\" and the second one throws \"rock\". for the third round, the first one throws \"rock\" and the second one throws \"paper\"."
+    },
+    {
+      "object_id": "af75875ad666822f1277ca88ac9b1522879254bae3e52955288e88c1eeff55d6",
+      "dataset": "interhuman",
+      "motion_id": "307",
+      "description": "they are engaged in a game of \"rock, paper, scissors.\" in the initial round, one makes a fist , the other makes a \"scissors\" hand gesture. in the second round, one shows an open hand , the other also shows an open hand. in the third round, one reveals an open hand again, while the other makes a \"scissors\" hand gesture."
+    },
+    {
+      "object_id": "15e2cb3c8d30a984b1898fd05566754da07f2c6d78cec12ee3a16e73e2ae5ec2",
+      "dataset": "interhuman",
+      "motion_id": "311",
+      "description": "they approach each other and start playing rock-paper-scissors."
+    },
+    {
+      "object_id": "91646e5e743c209b35b1ec0ab49c817673c4b58d79e2e27cd623692729dc0f96",
+      "dataset": "interhuman",
+      "motion_id": "337",
+      "description": "the first person throws the hands up in excitement and then wiggles the hands to celebrate. the other person lifts the right arm, followed by throwing the hands up and shaking them to cheer."
+    },
+    {
+      "object_id": "1d3c2b805ec7d87109855b901b60c0759ce6014e3dedde87610bf50486974644",
+      "dataset": "interhuman",
+      "motion_id": "364",
+      "description": "the two are grasping each other's hands forming a circle."
+    },
+    {
+      "object_id": "e527a21c2f671c489d4fdbee2f95c5ddef01821be3844a920630d2e756319cc7",
+      "dataset": "interhuman",
+      "motion_id": "382",
+      "description": "one person and the other person lift their arms enthusiastically and celebrate with joyous shouts."
+    },
+    {
+      "object_id": "5943df422474f4a17c9889cc3683622dd8a93ddc6ba62b381ce81f5a662e4474",
+      "dataset": "interhuman",
+      "motion_id": "386",
+      "description": "one person embraces the other with the left arm and lifts the right arm high up, meanwhile the other bends down slightly."
+    },
+    {
+      "object_id": "afc152978d3789f8f6550476e03ec2704d26c1432ba76f3869ea0629d81f54ba",
+      "dataset": "interhuman",
+      "motion_id": "397",
+      "description": "one person grips a pikachu doll on the right hand tightly, and one person tosses the pikachu doll toward the other person."
+    },
+    {
+      "object_id": "f3c9b094a25ae8b4dc2556a63ed61633d70ebf8a29f0842043c20931585d8914",
+      "dataset": "interhuman",
+      "motion_id": "398",
+      "description": "one person tosses the doll upward toward the other, who catches it moving forward."
+    },
+    {
+      "object_id": "b7fe36f7e49661cdfd8a145d8432b936dcff49c353e2478e9487d1647ae6eb3b",
+      "dataset": "interhuman",
+      "motion_id": "402",
+      "description": "both people saunter around in a circular path, meanwhile, one person tosses a doll to the other person."
+    },
+    {
+      "object_id": "2f9936393ab7d337798e2162118d8bc82a38934b3395447af9a4afa66bbb0bc6",
+      "dataset": "interhuman",
+      "motion_id": "408",
+      "description": "the first one circles around the second one, hands an object to the other person, and then the other person grasps it."
+    },
+    {
+      "object_id": "994e16e549968f85229c732ef9543e13abae06c8a5fcd63fe35dc42c834958ad",
+      "dataset": "interhuman",
+      "motion_id": "412",
+      "description": "the two getting closer and reaching their hands."
+    },
+    {
+      "object_id": "93c1a0099bbaf8c812bb060123267bfa53eed9c7f58291c8b195a3f7bd6834c4",
+      "dataset": "interhuman",
+      "motion_id": "414",
+      "description": "both people approach each other while gesturing with their hands."
+    },
+    {
+      "object_id": "d42ddce1e9909144700821630e5455f888de4a6b60313339dd8dd8b23cdf18e7",
+      "dataset": "interhuman",
+      "motion_id": "420",
+      "description": "one person strides towards the other person and seizes the document from their grasp."
+    },
+    {
+      "object_id": "adad753be329963b1c9ed537f3804aa8c34dbd8ee2e1d80fb2de8f250842ee93",
+      "dataset": "interhuman",
+      "motion_id": "423",
+      "description": "one looks at the other and turns her head to talk."
+    },
+    {
+      "object_id": "090b12e5966ad9e7d51fa2882e395174913d4c851e9e6279e971a9511cb225de",
+      "dataset": "interhuman",
+      "motion_id": "426",
+      "description": "the first person approaches the second, takes their hand and starts talking with enthusiasm."
+    },
+    {
+      "object_id": "605c281c8c79af79d6030a5a0f63eb681ace32417ce8282ac1ef1977471f1738",
+      "dataset": "interhuman",
+      "motion_id": "430",
+      "description": "one person is using hand gestures to communicate with the other person, who nods and gives a thumbs up in agreement."
+    },
+    {
+      "object_id": "33a4a0380805b3e91a1ee045b272a445a9611e51b629ecda82dcde6c73e76f39",
+      "dataset": "interhuman",
+      "motion_id": "432",
+      "description": "two individuals are approaching each other. one person greets by repeatedly raising and lowering their hands, while the other applauds."
+    },
+    {
+      "object_id": "a5aedfdd847cdecc3a9470e1964a982743a6c873ba5c0f26d608433e7f861eb8",
+      "dataset": "interhuman",
+      "motion_id": "433",
+      "description": "one person claps while the other person raises their right hand and applauds."
+    },
+    {
+      "object_id": "967c78fad861cd095a27924e27515c72069b1e488fc8890e9aefb1253283fb4a",
+      "dataset": "interhuman",
+      "motion_id": "434",
+      "description": "one and 2 approach each other, gesticulate and have an argument."
+    },
+    {
+      "object_id": "840fa3a1697fd54ec695d4d68e7cb69408e2c5792900a5155fd7753e9f9848aa",
+      "dataset": "interhuman",
+      "motion_id": "461",
+      "description": "one person crossing arms over the chest and shaking head in disagreement while the other is still talking and using hand gestures."
+    },
+    {
+      "object_id": "a8cfc9a21071a6e0eb494f22b40292e6e300be9532482df3582707ae6abccb38",
+      "dataset": "interhuman",
+      "motion_id": "469",
+      "description": "the first person takes a step backward, while the second raise the right arm."
+    },
+    {
+      "object_id": "89473aa750a0c88ea33d1b75a62902466d0a76bcc2da60295eb2a6a0c1d5460e",
+      "dataset": "interhuman",
+      "motion_id": "471",
+      "description": "the two guys engage in a physical altercation, shoving and confronting each other with harsh language."
+    },
+    {
+      "object_id": "b40feb61f2517fd23b7a1ed51afbb78246285289a4b16f7ca78ac129f8fa1b92",
+      "dataset": "interhuman",
+      "motion_id": "483",
+      "description": "both they play rock-paper-scissors, and they both make the same choice of paper."
+    },
+    {
+      "object_id": "effd10267d2c679b446b935d1a64753241817a0f998ae40e7ff469a1224eb04b",
+      "dataset": "interhuman",
+      "motion_id": "486",
+      "description": "two humans are playing rock-paper-scissors game, and one emerges as the winner."
+    },
+    {
+      "object_id": "424b0bf6397b56c779856441fa26ed7652bc5ca3f2ee57853994c6aced9c5b45",
+      "dataset": "interhuman",
+      "motion_id": "493",
+      "description": "two humans generate a back-to-back lifting action."
+    },
+    {
+      "object_id": "cb2c122178c2b4affe10ff0a71efca05601c6454b7241186ce423c8c54082754",
+      "dataset": "interhuman",
+      "motion_id": "512",
+      "description": "two people approach each other while simultaneously clapping each other's hands in a cross-handed manner."
+    },
+    {
+      "object_id": "48d62f93d43dc834300720dfa73eb93e97b99a02b799b8cb4c95eb0b50002c79",
+      "dataset": "interhuman",
+      "motion_id": "515",
+      "description": "the two guys are giving each other a high-five using alternate hands."
+    },
+    {
+      "object_id": "f02c5c7a32fda960eaa0286eccb5d65137dc649b743feaf226fa95df52d33be6",
+      "dataset": "interhuman",
+      "motion_id": "535",
+      "description": "the first one puts down their arm and moves forward in the direction of the second one."
+    },
+    {
+      "object_id": "5634b0720ab6094b43e089b7fa01f4e0ebe7d093d5be1c4432cfb11db51a48bc",
+      "dataset": "interhuman",
+      "motion_id": "571",
+      "description": "the two guys are executing opposing martial arts maneuvers."
+    },
+    {
+      "object_id": "666f59678d6de416f153c0b716ebfd1f1bb13ded013a4a73ef0619eb64271614",
+      "dataset": "interhuman",
+      "motion_id": "580",
+      "description": "two humans are engaged in taekwondo sparring, involving offensive and defensive moves toward each other."
+    },
+    {
+      "object_id": "a739dcf6afdc1ad96c907a8b9ae8a62bac4b08cd3ddaf206076284115205c62c",
+      "dataset": "interhuman",
+      "motion_id": "638",
+      "description": "two individuals are engaging in taekwondo combat."
+    },
+    {
+      "object_id": "4c9fadd9cc36a789beb01553caefae339c26a58bdfb2fb5ff10b1bdde7ab64b9",
+      "dataset": "interhuman",
+      "motion_id": "655",
+      "description": "one raises her right leg while the other person moves to the left."
+    },
+    {
+      "object_id": "729c3572eafd3ac0a65b0b1ed85a5188a32ae954d9ec5d8e41a27b87860e92ec",
+      "dataset": "interhuman",
+      "motion_id": "656",
+      "description": "two performers do taekwondo together, one person performs offensive movements and the other one exercises defensive tactics."
+    },
+    {
+      "object_id": "ce1cd77fd42799c447aec80d914ab12c8b89256d6771ac74f686f1dc58bfabd1",
+      "dataset": "interhuman",
+      "motion_id": "716",
+      "description": "the first one and the other person take one step backward."
+    },
+    {
+      "object_id": "9a3a9aadd5869048830b9a1754337a20b54ac9a0ea7fe5525cdf9e7d722ae331",
+      "dataset": "interhuman",
+      "motion_id": "721",
+      "description": "two performers greet each other with joy and execute a high-five."
+    },
+    {
+      "object_id": "4dad980ff8e4fd1346fa3ab97beaa2c0e4733568d0ad93835d7084229d7b22ab",
+      "dataset": "interhuman",
+      "motion_id": "741",
+      "description": "these two are posing for a photo to capture the moment."
+    },
+    {
+      "object_id": "756928b88e2102b66feccb1dff289c0459d82424094aeaab3da1b6f6d49a1866",
+      "dataset": "interhuman",
+      "motion_id": "754",
+      "description": "two humans greet each other enthusiastically."
+    },
+    {
+      "object_id": "d35de36ca3c9cb377db07d0e88931ddfc569a39e583093b66e6051e0ff06d1f6",
+      "dataset": "interhuman",
+      "motion_id": "788",
+      "description": "two humans lower their swords in unison."
+    },
+    {
+      "object_id": "42ca1a29bdc26f82b0901f448563a1a7455ff1ea6b55d81e407b0212c1cdaede",
+      "dataset": "interhuman",
+      "motion_id": "794",
+      "description": "one person approaches with a sword in their right hand, while the other person retreats holding a sword in their right hand."
+    },
+    {
+      "object_id": "e0cf30814e15dc03bea978eaea3ec53b13a0c8168038a2a131f6bd9376c10f10",
+      "dataset": "interhuman",
+      "motion_id": "801",
+      "description": "both people are rehearsing for a fencing competition, and the first person rushes in to make a hit with the sword on the second's body."
+    },
+    {
+      "object_id": "b7ae4a872d95c2cfc04f5c3a05280c46921102bd0ae357711f8d1fc3645d5728",
+      "dataset": "interhuman",
+      "motion_id": "804",
+      "description": "they perform a fencing match where one launches an attack and the other defends, after which one taps the chest of the other persons jacket."
+    },
+    {
+      "object_id": "333b6b3a30f4129ca318f06f24041416496278c251aa731f4ed0d4a2957b15f8",
+      "dataset": "interhuman",
+      "motion_id": "808",
+      "description": "they are dueling with swords, making attacks and counterattacks. the first one touches the tip of their sword to the chest of the other person."
+    },
+    {
+      "object_id": "92c5babcc6b63e8526aa6ff367f7f827694990e9bdb5649b28e680a9f8fb2297",
+      "dataset": "interhuman",
+      "motion_id": "811",
+      "description": "they are practicing fencing, one person lunges towards the other person, and the other person deflects the attack with the sword at one person's abdomen."
+    },
+    {
+      "object_id": "e4d513708d393e023adbda362a391e0d16764b0dd65300f4b5fb9af341497c8a",
+      "dataset": "interhuman",
+      "motion_id": "814",
+      "description": "one person's sword makes contact with the chest of the other person during their fencing practice."
+    },
+    {
+      "object_id": "612d8de81824e81655251079baf4c33ac183057157ce9f4205622967e297ef01",
+      "dataset": "interhuman",
+      "motion_id": "818",
+      "description": "both they are practicing fencing, and one person's sword grazes the top of the other person's head."
+    },
+    {
+      "object_id": "fce13fdb9e7a0511dc5821e4317bc7b60ba77eaeb316b3e07eb0a67f7d0522d3",
+      "dataset": "interhuman",
+      "motion_id": "824",
+      "description": "two humans are competing in a fencing match, one successfully strikes the other with the sword."
+    },
+    {
+      "object_id": "e2683d1b3daf15d66585ce678de8b70f01d3e8a96e40ae0cfa6a45f4f090a2ca",
+      "dataset": "interhuman",
+      "motion_id": "827",
+      "description": "these two are engaged in fencing practice. one lunges and touches the other's head with the foil."
+    },
+    {
+      "object_id": "acb35b9df16126b9089b0457782008e7ea14bc0fc3c1bffd5e5e0df911b78668",
+      "dataset": "interhuman",
+      "motion_id": "830",
+      "description": "both people are practicing fencing, the first person parries the second's sword and counterattacks immediately."
+    },
+    {
+      "object_id": "31abd6f811afa497a7e0acf31f08619b97d0b728a237461fde3052d0f6d765f7",
+      "dataset": "interhuman",
+      "motion_id": "839",
+      "description": "both people are engaged in a fencing exercise. the first one lunges forward and taps the second one on the head."
+    },
+    {
+      "object_id": "0ed5e7b4f7d29973eec1c51d37e76ed838414404a2544797697dffea7d50f4a1",
+      "dataset": "interhuman",
+      "motion_id": "845",
+      "description": "the first one steps into range to assault the other party."
+    },
+    {
+      "object_id": "734d76251cbc152db75d625b0d91b9182bb1250b812b4a23b1d6e2aabfab09bf",
+      "dataset": "interhuman",
+      "motion_id": "846",
+      "description": "two people experiment with fencing, with one making an assault on the other, who promptly responds with defense and a counter-attack on one."
+    },
+    {
+      "object_id": "1c54ab5eb635e781986aabc866f8ed1d9945587ce353220eb3aa4cc43ffd81f6",
+      "dataset": "interhuman",
+      "motion_id": "847",
+      "description": "the first person thrusts the sword forward, and the second parries backwards with a sword."
+    },
+    {
+      "object_id": "014b3cbe370a5c53c7d05e0d314693e1a55ea46a5d31017a6a4acba82ac6ad2e",
+      "dataset": "interhuman",
+      "motion_id": "850",
+      "description": "two humans are fencing against each other, the first person lunges forward and the second defends with a swift riposte."
+    },
+    {
+      "object_id": "263034ef1e46c62beb714a968b42b44bcef7faede1bd65c914c0984366631a7a",
+      "dataset": "interhuman",
+      "motion_id": "857",
+      "description": "both they engage in fencing practice and one person successfully strikes the other's head with their sword."
+    },
+    {
+      "object_id": "643eeba2b356438f90e11d28b7c36e220d7e5f0faded16af1284d64ff4707aee",
+      "dataset": "interhuman",
+      "motion_id": "858",
+      "description": "the first one retreats while the second one extends their arm forward."
+    },
+    {
+      "object_id": "a3d13a29575b5845019e9c33594affd6ce649e3ec898a679a409b29a6df1b19d",
+      "dataset": "interhuman",
+      "motion_id": "862",
+      "description": "one advances towards the other with an aggressive intent."
+    },
+    {
+      "object_id": "f39af9d6803e26225348e8dafe5e940059ffff4b09ba93b20c6f10300b6807ec",
+      "dataset": "interhuman",
+      "motion_id": "864",
+      "description": "the two sheathed their swords and dropped their arms."
+    },
+    {
+      "object_id": "c0bb650c0470116bfe300e8755563e92698cfd26fe12ec2ef144e903005a2208",
+      "dataset": "interhuman",
+      "motion_id": "865",
+      "description": "two people engage in a fencing spar, and one person makes contact with the other's chest using their sword."
+    },
+    {
+      "object_id": "0fcd462b7a0359b7a12e43c7d4498a8fab3d91e89568cb48eefbfc700b86fd43",
+      "dataset": "interhuman",
+      "motion_id": "868",
+      "description": "both people are doing fencing practice, attacking each other with their swords. during the practice, the first person make a short lunge and touches the tip of the sword to the top of the second's head."
+    },
+    {
+      "object_id": "108dff1ab50557884015cadbc7be984e83aaafc998ab4bdaeaf9a080be5050cf",
+      "dataset": "interhuman",
+      "motion_id": "876",
+      "description": "these two people are practicing fencing, one's sword strikes the other's chest gently."
+    },
+    {
+      "object_id": "8dd2d5491d31cb1cc208f95c10698a7dbbe5c9f998d8c6d201be9d4e08bcc6ed",
+      "dataset": "interhuman",
+      "motion_id": "881",
+      "description": "two people are sparring in fencing. the first person lunges at the second but gets skillfully countered, and then the second successfully strikes the first person in the chest."
+    },
+    {
+      "object_id": "d2b758f3e06e69b0882f15bb40dc401596cce50daa646c367779dc5d49194071",
+      "dataset": "interhuman",
+      "motion_id": "885",
+      "description": "two humans practicing fencing, taking turns attacking with swords until one person lands a hit on the other person's head."
+    },
+    {
+      "object_id": "e403c66b3d6d10f405f50d134a10dae09efc7959887417a2f20a00a2b8d7eff2",
+      "dataset": "interhuman",
+      "motion_id": "890",
+      "description": "the first person approaches one, while the second defends with a sword swing."
+    },
+    {
+      "object_id": "73a1c2ec489f725318201340214ff7979f9901c9924745901ca88da8e2577674",
+      "dataset": "interhuman",
+      "motion_id": "891",
+      "description": "the two are honing their fencing skills by engaging in sword fight, and one's sword makes contact with the other person's chest."
+    },
+    {
+      "object_id": "ea8586a8893e45279a6ee476b9939909c504706df3055ec9b9efcf54f4d05928",
+      "dataset": "interhuman",
+      "motion_id": "897",
+      "description": "both people are sparring with fencing swords. the first one's blade grazes or skims across the chest of the other person."
+    },
+    {
+      "object_id": "e23410788cd4a97a3d566abcbbca012edbd5bb1f214e3396c19e5d987dd1a12c",
+      "dataset": "interhuman",
+      "motion_id": "900",
+      "description": "these two participate in a fencing training session, launching attacks and defending against each other's moves. in the end, one person lands a successful strike, making contact with the chest of the other person."
+    },
+    {
+      "object_id": "44ae873225381140002f3637c2f21dc3cc1df793738f40a464a29bdb406a4f4c",
+      "dataset": "interhuman",
+      "motion_id": "903",
+      "description": "the two are engaging in fencing practice, swinging their swords towards each other, and with a swift movement, one's sword grazes the chest of the other."
+    },
+    {
+      "object_id": "f6f5f991e9f423555d288af7e12311bb0e58592727eef005b2bc5d6836efc86b",
+      "dataset": "interhuman",
+      "motion_id": "906",
+      "description": "these two are practicing fencing, and one person scores a hit on the other person's chest with the sword."
+    },
+    {
+      "object_id": "68c925d9364f4425a509343383fcea2b71e2b02edf22f8028c37e57e6e83d25a",
+      "dataset": "interhuman",
+      "motion_id": "908",
+      "description": "one advances towards the other, while wielding a sword, making contact with the other's body."
+    },
+    {
+      "object_id": "4b6b8060a3882800bbefadc55c0f2141f7bab553737e01fd7896eed23890416c",
+      "dataset": "interhuman",
+      "motion_id": "909",
+      "description": "they engaging in fencing, exchanging sword strikes with their right hands."
+    },
+    {
+      "object_id": "eaffe5490e1b10dad037f4317d19126623710dbd04f5d37c1194e1ca513b99bf",
+      "dataset": "interhuman",
+      "motion_id": "913",
+      "description": "two humans are engaged in a fencing match, thrusting their swords back and forth, and one person lands a hit upon the other's chest with the blade."
+    },
+    {
+      "object_id": "dff5a339fe7535a5481568b0ce8119f9582eab6ed8f3e2fa9786418a678b6c00",
+      "dataset": "interhuman",
+      "motion_id": "917",
+      "description": "they practice their fencing skills, using their blades to make fast lunges and sudden retreats. during the training, the first person makes a swift and precise strike that comes close to the second's head."
+    },
+    {
+      "object_id": "4ce445c4bee45e617b37d3d31aa2ae8b843bec538e9202030ca9002736b31268",
+      "dataset": "interhuman",
+      "motion_id": "922",
+      "description": "one fends off attacks with the sword while the other seizes every opportunity to strike."
+    },
+    {
+      "object_id": "df574c4af23f8ef2c8bf613e8b237efc448baf203262f3b76e4d2813a2566b9e",
+      "dataset": "interhuman",
+      "motion_id": "926",
+      "description": "the two guys are engaged in fencing. they exchange sword thrusts and, unfortunately, one person's sword directly makes contact with the other's head."
+    },
+    {
+      "object_id": "28fbcf167185fdcbb650a811d5ec692ca9b1b271d70a7aca8c2348b7c5e9eaf5",
+      "dataset": "interhuman",
+      "motion_id": "936",
+      "description": "both people simulate a fencing duel and make advancing moves towards each other. one person points his sword and gently pokes near the chest of the other person."
+    },
+    {
+      "object_id": "1239dc95bda46c1682419a2bcbe13c75e6561668fa6edaf2b64205a65b03cc96",
+      "dataset": "interhuman",
+      "motion_id": "938",
+      "description": "these two fight with swords, trading attacks and parries several times."
+    },
+    {
+      "object_id": "5f45628d40539b8c182bd4e39bf596dffe8534dbb5ed2ac8635fb7d0956c0a28",
+      "dataset": "interhuman",
+      "motion_id": "939",
+      "description": "two people are competing in fencing, completing three rounds."
+    },
+    {
+      "object_id": "063671ed12848d435aa23b4ceef367b517e5fba178608fb1cc8e7a13ac019082",
+      "dataset": "interhuman",
+      "motion_id": "943",
+      "description": "these two engage in fencing practice and launch simultaneous attacks at each other. one person's sword makes contact with the other person's chest."
+    },
+    {
+      "object_id": "b378a86858ccedf6c0d99c15438d15d73c30a8d4a4d1b0b2f9d342193ce1aedd",
+      "dataset": "interhuman",
+      "motion_id": "951",
+      "description": "man 1 and the first one are fencing, increasing their intensity, and the first one's blade nicks man 1's chest."
+    },
+    {
+      "object_id": "0b071fbc11d18963ad6edce5d7d83ae7ff26df53028ea94ee7982b9eca2282e7",
+      "dataset": "interhuman",
+      "motion_id": "953",
+      "description": "the first person moves away and the second attempts to strike with the sword."
+    },
+    {
+      "object_id": "cea42a1c30b3ecb51798b838288d9f66ec21459b451dec6e3efc8efd1fc72f72",
+      "dataset": "interhuman",
+      "motion_id": "955",
+      "description": "one retreats and then advances towards the other in an attempt to attack. in response, the other wields the sword in a swing."
+    },
+    {
+      "object_id": "ebdacdf378936708224497e5972034cf529d7976e84d48c687b6a755676af7b7",
+      "dataset": "interhuman",
+      "motion_id": "957",
+      "description": "two humans engage in fencing practice, by holding the other's sword to compare them."
+    },
+    {
+      "object_id": "2deb99c501b7da08af1666e2bf8074e1f4fd4c5d95068384b620343939bf494f",
+      "dataset": "interhuman",
+      "motion_id": "959",
+      "description": "the two raise their swords and lower them, then one person advances one step."
+    },
+    {
+      "object_id": "dcea1bc51e7929c772414530304c4788de2bcccf613fbd7639bdda13414504ee",
+      "dataset": "interhuman",
+      "motion_id": "960",
+      "description": "two people are engaged in a fencing match, with the first one landing a strike on the second one."
+    },
+    {
+      "object_id": "0702d2b7173b0a95e2e3fff6decdf0064cc2a760d8f299c14f2ab16af36826d0",
+      "dataset": "interhuman",
+      "motion_id": "963",
+      "description": "these two people are dueling with swords, and one's sword grazes the head of the other person."
+    },
+    {
+      "object_id": "8b72938ec80a9dca508caa8d44b2792533629c3aa9b2d6d3c4bdefb55bc8e463",
+      "dataset": "interhuman",
+      "motion_id": "967",
+      "description": "two performers engage in a fencing match, thrusting their swords to attack each other."
+    },
+    {
+      "object_id": "83226730204728ebdffc281a8cfe0444c9bd02e489516cdb84a85ad9a088b359",
+      "dataset": "interhuman",
+      "motion_id": "971",
+      "description": "two humans are practicing fencing, and one person's sword strikes the other person's chest."
+    },
+    {
+      "object_id": "430b6acb69f3447329182cc2938bad9b1bd8db77a2c3cfe8d0e53d98c2d84bf5",
+      "dataset": "interhuman",
+      "motion_id": "975",
+      "description": "these two people are practicing swordsmanship and one makes contact with the other's shoulder with their sword."
+    },
+    {
+      "object_id": "bbbabe114134a476deeb0f6da99910ef2737e6afe722c5f901b7e1842f90f380",
+      "dataset": "interhuman",
+      "motion_id": "981",
+      "description": "both they are doing fencing practice. the first one makes a lunge towards the second one, but the second one quickly parries with his sword and then makes a successful touch to the first one's head."
+    },
+    {
+      "object_id": "e613590b056d1b3f176035ebdcaf95e0b706bb10fb2f04e6bce162f55ab60261",
+      "dataset": "interhuman",
+      "motion_id": "989",
+      "description": "two people engage in a fencing match, thrusting at each other with their swords."
+    },
+    {
+      "object_id": "15ced618ae8db44373aa494bd425ad710dc62d2eac42ab0596d9a3902ed3c250",
+      "dataset": "interhuman",
+      "motion_id": "993",
+      "description": "the first one strikes the second one with the sword on the head during fencing."
+    },
+    {
+      "object_id": "223e096454108866cd404a532776e6db2fa0be22d801e7c5658752b8f0b6c818",
+      "dataset": "interhuman",
+      "motion_id": "996",
+      "description": "the two guys are training in fencing, each holding a sword. the first one removes a speck on the second one's blade."
+    },
+    {
+      "object_id": "4b3eb78faa18ce665069cb5130ed8cd37494bb95e0873ddad18405645a22045b",
+      "dataset": "interhuman",
+      "motion_id": "997",
+      "description": "in his right hand, one grips his sword and carries the sword of the other with the other hand."
+    },
+    {
+      "object_id": "028d5bd17450baa71dd2eeef28bf899f27e70a0e789470b33fa737c855388742",
+      "dataset": "interhuman",
+      "motion_id": "999",
+      "description": "these two experiment with fencing, and the first person's foil touches the second's chest."
+    },
+    {
+      "object_id": "20f34ba4875c1f4749398f18533a8b23a571a44a33939c80ac1c7e843c9dcbae",
+      "dataset": "interhuman",
+      "motion_id": "1002",
+      "description": "one person pulls out their sword, takes two steps back to the starting position. the other person steps forward two steps while withdrawing their own sword."
+    },
+    {
+      "object_id": "0891239f19c61d95bcabfb0b061619541904e8972ff88fa333c3d77ba14b05eb",
+      "dataset": "interhuman",
+      "motion_id": "1003",
+      "description": "two people are practicing the art of fencing, and one person lands a touch on the other person's chest with their sword."
+    },
+    {
+      "object_id": "94dad72c425e48f6c23960ab712cbc3cba840753fd7193f1dffb91036e6e9c57",
+      "dataset": "interhuman",
+      "motion_id": "1006",
+      "description": "these two people retreats to their initial positions while holding the sword in their right hand in a downward position."
+    },
+    {
+      "object_id": "96643a9ddc9393cefc8a633979cea21f1cddf7c48645412330e5c8d83a068f08",
+      "dataset": "interhuman",
+      "motion_id": "1007",
+      "description": "two humans actively engage in fencing practice, frequently taking turns to attack and evade each other's attacks."
+    },
+    {
+      "object_id": "c85184e19c7f0c19dea57116de3c9d41c5fda09e1c9f0905ea27ac45fa3f5bfe",
+      "dataset": "interhuman",
+      "motion_id": "1010",
+      "description": "the two guys are performing fencing movements. one is on the offensive, while the other tries to parry the attack."
+    },
+    {
+      "object_id": "17d144b0fbdcf6967868f854caed12fa9e14adcb0eddc72414009864c1ee8d64",
+      "dataset": "interhuman",
+      "motion_id": "1016",
+      "description": "these two are capturing a moment where one of them strikes a pose while the other takes the picture."
+    },
+    {
+      "object_id": "a0148494ca460330a7c000ef2590c1dcfba7471bbb3ba3b7c3d1b3f3ca33a68b",
+      "dataset": "interhuman",
+      "motion_id": "1023",
+      "description": "the first one shows agreement by shaking the head, while the second one twists towards right and gestures to the right direction using the right hand."
+    },
+    {
+      "object_id": "72167ee6241e3554060a6c1b98ae847832e704234a606b96ff8d97dddf50312c",
+      "dataset": "interhuman",
+      "motion_id": "1025",
+      "description": "the first person detects the second and darts towards them with eagerness. the first person invites the second to watch a film, but the second declines with a helpless shake of the head."
+    },
+    {
+      "object_id": "b075e3ec75994230067bf7736d6cccb7e7115374d6e5abfd613fa125eb427423",
+      "dataset": "interhuman",
+      "motion_id": "1027",
+      "description": "the first one continuously jostles the second one while the latter shakes the head in resignation."
+    },
+    {
+      "object_id": "805ac8a5ee50b8decdae23e93db5b2bc467efa7685b00ce141bce2957eee7831",
+      "dataset": "interhuman",
+      "motion_id": "1028",
+      "description": "the first person presents the book's content to the second, and the second approves the book with a thumbs up gesture."
+    },
+    {
+      "object_id": "89ed825a45eae6b941257704b7a992593f28b35cc012146d2a822591e7c98312",
+      "dataset": "interhuman",
+      "motion_id": "1030",
+      "description": "the two both approve of this book with a thumbs up gesture."
+    },
+    {
+      "object_id": "a6f6848804217a230a1959f977752a41e60014a455ebf3259a62268c1c95272c",
+      "dataset": "interhuman",
+      "motion_id": "1031",
+      "description": "one person introduces the book's contents to the other person, after which both individuals applaud and compliment the book."
+    },
+    {
+      "object_id": "21f71a734de77ea261db1b38dd3c9bd741211b14839fd7aaa9cf9935c957da33",
+      "dataset": "interhuman",
+      "motion_id": "1034",
+      "description": "the two high-five each other repeatedly to celebrate the book."
+    },
+    {
+      "object_id": "6b98aff1fa51c489f5b3e794263e176e1f50c999dadff0b00bf0bfde8590f00d",
+      "dataset": "interhuman",
+      "motion_id": "1037",
+      "description": "one person lowers the left hand and lifts up the right hand, gesturing towards the other person, who then lowers the left hand and raises the right hand, pointing back towards one person."
+    },
+    {
+      "object_id": "c7d865e891798986c79c84b1f4b3102b97641e116ebc62707f18d330748cb078",
+      "dataset": "interhuman",
+      "motion_id": "1041",
+      "description": "the paper tapping sound comes as one person strikes it with their right hand, while the other person lowers it gently using their left hand."
+    },
+    {
+      "object_id": "589f2ed1628c9f859b2362c4b1673c8099345f9f0c4aa8bbec6aa4a317a91116",
+      "dataset": "interhuman",
+      "motion_id": "1052",
+      "description": "two humans have a conflict caused by conflicting opinions. one person is convinced that their opinion is accurate, while the other person perceives one person's standpoint as mistaken."
+    },
+    {
+      "object_id": "61b408b15984475f4a75da703d9812aceb5999106ca4decd761629e12c5d0f54",
+      "dataset": "interhuman",
+      "motion_id": "1055",
+      "description": "the other person pats one person's shoulder with their right hand, and in response, one person swings their right hand."
+    },
+    {
+      "object_id": "160611ca175cee230caf1c7f5c811d00f99cae28c0810672ee5b0aeb52b488de",
+      "dataset": "interhuman",
+      "motion_id": "1060",
+      "description": "two performers are playing with a doll, with the first one hurling it directly at the second one, and the second one successfully snatches and holds the doll."
+    },
+    {
+      "object_id": "46457f21147084839fce0b47d0a3ee5fccd48c55227f59485b1b1ca5c0561597",
+      "dataset": "interhuman",
+      "motion_id": "1065",
+      "description": "they swap their locations and turn around."
+    },
+    {
+      "object_id": "9eae3a398cd3b1aff52416fdfc2806dd5ceefcd67b9e250ae3d5dcb46aa57f16",
+      "dataset": "interhuman",
+      "motion_id": "1066",
+      "description": "both people are giving each other playful shoves."
+    },
+    {
+      "object_id": "c6a74fa55e59bfbf08ba2b67ab68dd3e3cd8f2d3f31530d72c4fe8800d12d129",
+      "dataset": "interhuman",
+      "motion_id": "1088",
+      "description": "these two advance at the same pace while playing the game."
+    },
+    {
+      "object_id": "d89f7694f9d1e12dd24dbc7eb38738d0a84597585c3af3c89d1614b924f7eabd",
+      "dataset": "interhuman",
+      "motion_id": "1096",
+      "description": "one person eagerly anticipates the other person's arrival, while the other person extends both her arms, rushes towards one person with enthusiasm and taps them gently."
+    },
+    {
+      "object_id": "26b48f5e0719afafa3c99692e0805981f0ea6fd55520587f2035bb797d00e68c",
+      "dataset": "interhuman",
+      "motion_id": "1099",
+      "description": "the two guys are engaged in a game. one of them tosses a doll to the other, and the latter one skillfully catches it."
+    },
+    {
+      "object_id": "a1296b006ebfc1daae8dde261bd0c157137678a7884d278271bca7895b023c05",
+      "dataset": "interhuman",
+      "motion_id": "1119",
+      "description": "one person tosses a rope toward the other person, captures the other person, and drags the other one back."
+    },
+    {
+      "object_id": "b07c8f9d15d6fb636458e4af5a826c6143735af12f6ac2bee79d16d7bd809b48",
+      "dataset": "interhuman",
+      "motion_id": "1126",
+      "description": "these two interact with dolls. initially, the first one strikes a blow to their own doll and the second one mirrors the movement by throwing their doll at the first one."
+    },
+    {
+      "object_id": "6447d80568aa252947157644143a768c13c30bb075cef8c47c9749a651c28f4f",
+      "dataset": "interhuman",
+      "motion_id": "1135",
+      "description": "both people move to the left of person1 after turning around."
+    },
+    {
+      "object_id": "4fae6987b6013ab4a65ad784b3c603f0c96efa56a9b599cc4983b81d576692a2",
+      "dataset": "interhuman",
+      "motion_id": "1145",
+      "description": "they engage in a game of tug-of-war, with the final victory going to the first person."
+    },
+    {
+      "object_id": "fc5e0933e63704fbe422e49656dcd1af3f2b404ea10c62c45e5995124ea1120e",
+      "dataset": "interhuman",
+      "motion_id": "1148",
+      "description": "both they are exchanging hand claps, first with their right hands, then with their left hands, and finally with both hands together."
+    },
+    {
+      "object_id": "3fe8a1bf66f392212134d3b0ef92d7d2fdd4877ae0c41499fec2b278ca552016",
+      "dataset": "interhuman",
+      "motion_id": "1149",
+      "description": "these two are exchanging claps while playing a game."
+    },
+    {
+      "object_id": "8945a683fb69109e583dd20807f7ff9466c43a0cd6f051de19272ccdd175bf7d",
+      "dataset": "interhuman",
+      "motion_id": "1151",
+      "description": "the first person points at the doll in the hand of the second, and the second tosses the doll over to the first person."
+    },
+    {
+      "object_id": "d71de9049e0f9a7cdbe13a46a79914f7ee4bb70204969cce982a341518dd4de7",
+      "dataset": "interhuman",
+      "motion_id": "1169",
+      "description": "the first person picks up the phone with the right hand, while the second moves forward and spots it."
+    },
+    {
+      "object_id": "417818ec80421f8c94737ac8910440dadf8ef30018233b97fd32a0d3818fe396",
+      "dataset": "interhuman",
+      "motion_id": "1184",
+      "description": "the two guys circle each other before engaging in combat."
+    },
+    {
+      "object_id": "72918c654de0ba8f92029cea61bad729a058906393822da3f514010dfb5afc16",
+      "dataset": "interhuman",
+      "motion_id": "1187",
+      "description": "one person lifts the left leg as an attack while the other person lifts the right leg in defense."
+    },
+    {
+      "object_id": "8e55e20433c604a919341c85a6fde517b44f7a7cc4fcb32ca2618f7dc46edd95",
+      "dataset": "interhuman",
+      "motion_id": "1200",
+      "description": "one person moves to the opposite direction, while they both extend their right legs for a simultaneous attack."
+    },
+    {
+      "object_id": "42e16ba2c84fb97e4ca5d4f7da0198f35cd862a02f278d45710eee46210f3bbf",
+      "dataset": "interhuman",
+      "motion_id": "1206",
+      "description": "two humans bring up their right legs to strike."
+    },
+    {
+      "object_id": "17597b0d3d088defabb1ca337cdc64487abfc688873d8208285bf9fcada23131",
+      "dataset": "interhuman",
+      "motion_id": "1209",
+      "description": "the first one lifts the right leg to attack, and the second one pivots to lift the left leg to defend against the first one's attack."
+    },
+    {
+      "object_id": "d9b5037d3df41812f64b5fb1d36d30187074d1b6b37743953b32651281edb2a2",
+      "dataset": "interhuman",
+      "motion_id": "1219",
+      "description": "one sidesteps to the right, encircling the other individual."
+    },
+    {
+      "object_id": "162b612276cf162eafc43e82879e42fa15b585697b0476cb9a0596c742b4cf6a",
+      "dataset": "interhuman",
+      "motion_id": "1221",
+      "description": "they take a step back and then move sideward towards the right."
+    },
+    {
+      "object_id": "a4dabcd379b28fca7afa718182b1692727c6b785e1d7264310956c3920529485",
+      "dataset": "interhuman",
+      "motion_id": "1238",
+      "description": "the first person lifts the left leg to strike, and in response, the second pivots and elevates the right leg to retaliate."
+    },
+    {
+      "object_id": "d6b143b7e7a9903acff3d6a0c13315687e00fa71fb3b6ad3d1072ec201048666",
+      "dataset": "interhuman",
+      "motion_id": "1239",
+      "description": "both people raise their right legs as if to strike each other."
+    },
+    {
+      "object_id": "aa2e070326a4a1d7b8de08af5188b014ae0fa3c4e4dcc74a47c529be323dd199",
+      "dataset": "interhuman",
+      "motion_id": "1241",
+      "description": "one person lifts the right leg to strike, whereas the other person responds by raising their left leg in a defensive move."
+    },
+    {
+      "object_id": "d12fdda131d22e8684ceb3f1df96f26d718aa91c730295706bcbcf2c4472538f",
+      "dataset": "interhuman",
+      "motion_id": "1242",
+      "description": "both people lift their right legs and move forward aggressively."
+    },
+    {
+      "object_id": "50f6b8d6b02599d298b3dfd1d3d0f2db312c0525252ef1fe15506ef6479fc37c",
+      "dataset": "interhuman",
+      "motion_id": "1266",
+      "description": "they engage in combat by raising their left legs towards each other."
+    },
+    {
+      "object_id": "538d89208c2dc9501260b3774f73fdc005d96c5367ef6adcd0bb00566e591f8f",
+      "dataset": "interhuman",
+      "motion_id": "1267",
+      "description": "one person lifts his right leg in order to strike, while the other person pivots and raises his right leg to counter-strike."
+    },
+    {
+      "object_id": "6e28108fdde8b361699c59e5037fe6a5dffa5b1ddb0632039e93a64fd95ce12f",
+      "dataset": "interhuman",
+      "motion_id": "1275",
+      "description": "the first person assaults the second with a leg movement and in response, the second retaliates using a right-leg movement."
+    },
+    {
+      "object_id": "078ebf61b19e188299aa111d770763bc77ce90f466d2314bddf15c575d2131d0",
+      "dataset": "interhuman",
+      "motion_id": "1277",
+      "description": "these two spin suddenly and start confrontational movement."
+    },
+    {
+      "object_id": "96773b398b5d1c68575054e2e802628cc48a183d9d6ae37c72e85fa6faab09bf",
+      "dataset": "interhuman",
+      "motion_id": "1286",
+      "description": "these two people move towards the right side, they face each other and prepare for the next move."
+    },
+    {
+      "object_id": "ef4e24e9ae5da6766bd9b449275181a8a79caf8e57795c330a6a8f7e1c23cd97",
+      "dataset": "interhuman",
+      "motion_id": "1293",
+      "description": "the first one pretends to attack and then retreats, while the second one avoids the attack and then advances to make an attempt."
+    },
+    {
+      "object_id": "5e2f821d553dcc576370471eb28612bd6142f9262afb72d5f922ae8d5ba4d96d",
+      "dataset": "interhuman",
+      "motion_id": "1308",
+      "description": "in a conflict, both people both raise their right legs."
+    },
+    {
+      "object_id": "4dfbc37ad06672d19f0cc8c59cccbb15986eadfd91b59713d809177b042ef016",
+      "dataset": "interhuman",
+      "motion_id": "1309",
+      "description": "the left leg of one is lifted in an attempt to attack while the other raises their right leg defensively."
+    },
+    {
+      "object_id": "457b92548613cd00a119ea7cccec00a5a4c8c6a789e9648eb6f8cecbfb176367",
+      "dataset": "interhuman",
+      "motion_id": "1319",
+      "description": "the first one lifts his right leg to strike at the opposite person, and the other person swiftly revolves to elevate the left leg to retaliate."
+    },
+    {
+      "object_id": "116e7f1847fde46ed19f861f294ef4b910eb794114939d73639dca0e5ca9ee2d",
+      "dataset": "interhuman",
+      "motion_id": "1332",
+      "description": "they both make a gesture of preparation while stepping to the right."
+    },
+    {
+      "object_id": "40dbc8ea4104dc9894c5e8090f0535b7c92a28d6c513fb6e0060c6d64780b885",
+      "dataset": "interhuman",
+      "motion_id": "1363",
+      "description": "the first person circles around the second clockwise, while the second uses agile, small steps to approach and prepare for confrontation."
+    },
+    {
+      "object_id": "d392a63e3ae5610f1a2364ed83ea570039c677527089b155834677d25abc9e7e",
+      "dataset": "interhuman",
+      "motion_id": "1369",
+      "description": "the two guys raise their left legs simultaneously to prepare for an attack."
+    },
+    {
+      "object_id": "b511a62c79aa006eab82320d5f76b40eefb02e3afd85d9599eb7114096ba6593",
+      "dataset": "interhuman",
+      "motion_id": "1372",
+      "description": "the first person lifts the right leg to strike, and the second pivots to raise the left leg in retaliation."
+    },
+    {
+      "object_id": "5541e242c9763fdd8ef075123e026a97ce1fcd3651cbb0d52d49aa7ef8166189",
+      "dataset": "interhuman",
+      "motion_id": "1373",
+      "description": "two people raise their right legs simultaneously to strike each other."
+    },
+    {
+      "object_id": "6fb231fe05e223cb1dd724f59e09da9d66278ad92f434cea210c3e148ac3296a",
+      "dataset": "interhuman",
+      "motion_id": "1375",
+      "description": "these two step forward and lift their right legs to strike each other."
+    },
+    {
+      "object_id": "826035fd5116911f549c6ec11d1f312a74484625baacb3f67b582e4339c470fb",
+      "dataset": "interhuman",
+      "motion_id": "1380",
+      "description": "the first person lifts the left leg as a response to attack the second, and the second fends off by lifting the right leg towards the first person."
+    },
+    {
+      "object_id": "9c4484d27c12ab30a33d6eb6e131d6d5983422e9e93827cf348ef0c15188ecbc",
+      "dataset": "interhuman",
+      "motion_id": "1381",
+      "description": "the first one lifts their right leg to strike the second one."
+    },
+    {
+      "object_id": "e850c43700980d5a05a8029a6ad264a6ffce8144a2c4c82d1b1028e0b364a550",
+      "dataset": "interhuman",
+      "motion_id": "1383",
+      "description": "one person lifts the left leg to strike at the other person, but the other person defends by raising the right leg."
+    },
+    {
+      "object_id": "2c8dd668b711f7bb7365abf60ad67519ae011fb3a06eb86c57d7461650daabec",
+      "dataset": "interhuman",
+      "motion_id": "1386",
+      "description": "one attacks the other with a raised right leg while the other responds with a raised left leg to counterattack."
+    },
+    {
+      "object_id": "cd3a67eca2282237e976ea21c738e16fdadbc0541c327125b6d2f0de99cd0042",
+      "dataset": "interhuman",
+      "motion_id": "1392",
+      "description": "the first person lifts the right leg to strike at the other person, and the other person responds by raising their left leg to defend."
+    },
+    {
+      "object_id": "b0e46a29d571be602107308e09cedfd3e7cb205d467168ff3c976fe07a309303",
+      "dataset": "interhuman",
+      "motion_id": "1393",
+      "description": "two people step ahead simultaneously, raising their right legs for an attack."
+    },
+    {
+      "object_id": "dd60b60d8403bb29cfecbb07909e981b8f6f8a4033f4a45ff9064b5c9e44189c",
+      "dataset": "interhuman",
+      "motion_id": "1394",
+      "description": "one person seizes the right leg of the other person and lifts his own left leg to attempt an attack."
+    },
+    {
+      "object_id": "d7a28c731417d6c28e80aeda789d7937f41fd7d1db634671265e74d8245ab278",
+      "dataset": "interhuman",
+      "motion_id": "1396",
+      "description": "one rotates and lifts the right leg to strike the other, and the other person raises the left leg to counter the attack."
+    },
+    {
+      "object_id": "ec77b17268ed53ffb9adbe406b1ea444457b7a239b8c33db34f04477b99ae8dd",
+      "dataset": "interhuman",
+      "motion_id": "1402",
+      "description": "the first one moves to the opposite side, strikes the second one using the right leg while the other person counters with the left leg."
+    },
+    {
+      "object_id": "4d39a1a0762a4953e189afe69b2469ce201a97a5b9067232a2ecee0b57080247",
+      "dataset": "interhuman",
+      "motion_id": "1403",
+      "description": "the first person moves to the opposite side, and then the second uses a right leg strike on the first person. the first person retaliates with a right leg counter-strike."
+    },
+    {
+      "object_id": "ac78e85de2136bb7e6e9fd7fdff9e404c196fe7e94f187cd6a1902e1e8060829",
+      "dataset": "interhuman",
+      "motion_id": "1412",
+      "description": "the first one lifts the left leg indicating an attack to which the second one responds by raising the right leg."
+    },
+    {
+      "object_id": "bd9030dd1ca58b0afaadfe296b978e3d25ca7d0c21c5cb1746f78ed1ffb7dccb",
+      "dataset": "interhuman",
+      "motion_id": "1413",
+      "description": "these two lift their right legs to strike each other, after which one strikes with their left leg."
+    },
+    {
+      "object_id": "9470fd509da6448451dbf0d0e1bc8c2e4c5395f72e8935bf672d590886a869ac",
+      "dataset": "interhuman",
+      "motion_id": "1414",
+      "description": "the other person raises the left leg intending to strike the first one."
+    },
+    {
+      "object_id": "5d9481b8918d9ae1d61b2dbb6ce5df8153db7e5c220a79beadaa9d7898dc0409",
+      "dataset": "interhuman",
+      "motion_id": "1415",
+      "description": "the conflict arises as the first person lifts the left leg to strike, and the second counters with a raised right leg."
+    },
+    {
+      "object_id": "d5c9941d89bc2483a61430f68b398812f20c368d442f645918778d7cffa0b235",
+      "dataset": "interhuman",
+      "motion_id": "1416",
+      "description": "one person lifts the left leg to strike at the other person, and the other person retaliates by lifting the right leg."
+    },
+    {
+      "object_id": "af8376e69f013a3544ce7bd82429f6a824243d42d4400ccf9aea8dbe32dbff7c",
+      "dataset": "interhuman",
+      "motion_id": "1419",
+      "description": "one lifts the left leg to strike at the other, and in response, the other pivots and extends their right leg towards one."
+    },
+    {
+      "object_id": "af52c392a8631d90d6b5d68d2e4ddfe7307d5cc2970622529affe80acf3f60be",
+      "dataset": "interhuman",
+      "motion_id": "1425",
+      "description": "both they circle each other and attempt to strike."
+    },
+    {
+      "object_id": "3fdcb2c31217c15cb23a6e07cd064ba2a7322c094c6fb5d38cdccc05a3e199b5",
+      "dataset": "interhuman",
+      "motion_id": "1436",
+      "description": "the first person lifts the right leg in attempt to strike, while the other one raises the left leg to counterattack."
+    },
+    {
+      "object_id": "099b531e69b9bbcad320106962770baf68956ee338c3ee9237fd1e99cec4e5ea",
+      "dataset": "interhuman",
+      "motion_id": "1437",
+      "description": "these two raise their right legs to engage in a physical clash."
+    },
+    {
+      "object_id": "0f48d22cc4bb3ffeb2aac966658061fa2d9dd52c7af38e7fb43e1dc1b03807da",
+      "dataset": "interhuman",
+      "motion_id": "1441",
+      "description": "one person lifts the right leg with an intent to strike. in response, the other person raises the left leg defensively."
+    },
+    {
+      "object_id": "cb4b162c5c9a37527b09ec9a3cef9a5797194c77bbcc21fc8550b4d148d46494",
+      "dataset": "interhuman",
+      "motion_id": "1444",
+      "description": "the first one pivots and lifts the left leg, preparing to strike the other person, while the second one elevates their right leg in defense."
+    },
+    {
+      "object_id": "f352fb2572912344eac281f16a734ac0b5058b5595ba341f4164ee89bdc38e52",
+      "dataset": "interhuman",
+      "motion_id": "1445",
+      "description": "two people both raise their right legs to strike simultaneously."
+    },
+    {
+      "object_id": "051252dd176dfc016fe0a3383106dc501e2abb5411cf4bc6164c9571a839a9d6",
+      "dataset": "interhuman",
+      "motion_id": "1449",
+      "description": "the first one lifts the right leg to strike at the other person."
+    },
+    {
+      "object_id": "b293e1b822642bfafcf7c121b412d0370b51b996359263459ff9a4d0905469a7",
+      "dataset": "interhuman",
+      "motion_id": "1451",
+      "description": "the first person lifts the right leg in an aggressive manner towards the second, and the other one raises their right leg to defend themselves."
+    },
+    {
+      "object_id": "3844524dfff5861c6fc7c7db57c0c0a72f6f2c818b71846b21da854aab29236c",
+      "dataset": "interhuman",
+      "motion_id": "1454",
+      "description": "one person lifts the right leg aggressively to strike, and the other responds by raising the right leg defensively."
+    },
+    {
+      "object_id": "c0c05be04091f86231d8da8859e8e2ad0badbddfac31c8589a2052592f7cb577",
+      "dataset": "interhuman",
+      "motion_id": "1455",
+      "description": "one person lifts the right leg, trying to attack. in response, the other raises the left leg with an attacking intent."
+    }
+  ],
+  "catalog_validation_errors": []
+}

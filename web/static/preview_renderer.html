@@ -1,0 +1,85 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Preview Renderer</title><style>html,body,#root{margin:0;width:100%;height:100%;overflow:hidden;background:#101820}</style></head><body><div id="root"></div><script type="module">
+import * as THREE from './vendor/three.module.js';
+import { GLTFLoader } from './vendor/GLTFLoader.js';
+
+const params = new URLSearchParams(location.search);
+const modelUrl = params.get('model');
+const width = Number(params.get('width') || 512);
+const height = Number(params.get('height') || 320);
+const root = document.getElementById('root');
+root.style.width = `${width}px`;
+root.style.height = `${height}px`;
+
+window.__PREVIEW_STATUS__ = 'loading';
+window.__PREVIEW_ERROR__ = '';
+
+function fitObjectCamera(object, camera, padding = 1.56, fixedFront = false) {
+  if (fixedFront) {
+    object.updateMatrixWorld(true);
+    object.traverse((child) => { if (child.isSkinnedMesh) child.skeleton.update(); });
+  }
+  const box = new THREE.Box3().setFromObject(object, fixedFront);
+  if (fixedFront) {
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+    const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(camera.aspect, 0.01));
+    const heightDistance = size.y / Math.max(2 * Math.tan(verticalFov / 2), 0.01);
+    const widthDistance = size.x / Math.max(2 * Math.tan(horizontalFov / 2), 0.01);
+    const distance = Math.max(heightDistance, widthDistance, 1.0) * padding;
+    const targetY = box.min.y + size.y * 0.5;
+    camera.position.set(center.x, targetY, box.max.z + distance);
+    camera.lookAt(center.x, targetY, center.z);
+    camera.near = Math.max(distance / 200, 0.01);
+    camera.far = Math.max(distance * 8, 80);
+    camera.updateProjectionMatrix();
+    return;
+  }
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const center = sphere.center;
+  const radius = Math.max(sphere.radius, 1.0);
+  const fov = THREE.MathUtils.degToRad(camera.fov);
+  const distance = (radius / Math.sin(fov / 2)) * padding;
+  camera.position.set(center.x + radius * 0.28, center.y + radius * 1.38, center.z + distance);
+  camera.lookAt(center.x, center.y + radius * 0.56, center.z);
+  camera.near = Math.max(distance / 200, 0.01);
+  camera.far = Math.max(distance * 8, 80);
+  camera.updateProjectionMatrix();
+}
+
+function middleAnimationTime(gltf) {
+  if (!gltf.animations || !gltf.animations.length) return 0;
+  const duration = Math.max(...gltf.animations.map((clip) => Number(clip.duration || 0)));
+  return duration > 0 ? duration * 0.5 : 0;
+}
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101820);
+const camera = new THREE.PerspectiveCamera(42, width / height, 0.01, 200);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x273241, 2.4));
+const light = new THREE.DirectionalLight(0xffffff, 2.0);
+light.position.set(3, 6, 4);
+scene.add(light);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(width, height, false);
+root.appendChild(renderer.domElement);
+
+new GLTFLoader().load(modelUrl, (gltf) => {
+  scene.add(gltf.scene);
+  if (gltf.animations && gltf.animations.length) {
+    const mixer = new THREE.AnimationMixer(gltf.scene);
+    gltf.animations.forEach((clip) => mixer.clipAction(clip).play());
+    mixer.setTime(middleAnimationTime(gltf));
+    mixer.update(0);
+  }
+  const dataset = String(gltf.parser?.json?.extras?.dataset || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  fitObjectCamera(gltf.scene, camera, 1.56, dataset === "motionx" || dataset === "motionxpp");
+  renderer.render(scene, camera);
+  window.__PREVIEW_STATUS__ = 'ready';
+}, undefined, (error) => {
+  window.__PREVIEW_ERROR__ = String(error && error.message ? error.message : error);
+  window.__PREVIEW_STATUS__ = 'failed';
+});
+</script></body></html>

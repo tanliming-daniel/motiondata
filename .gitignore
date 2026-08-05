@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+*.pid
+*.runtime.ini
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+.DS_Store
+
+# Repository-specific generated artifacts
+cache/models/
+cache/previews/
+client_output/
+dataset/*.tmp
+dataset/*_cache/
+frpc_api.runtime.ini
