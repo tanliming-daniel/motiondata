@@ -36,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--height", type=int, default=240)
     parser.add_argument("--quality", type=int, default=80, help="WebP quality from 1 to 100.")
     parser.add_argument("--workers", type=int, default=8, help="Concurrent PNG migration workers.")
+    parser.add_argument("--shard-count", type=int, default=1, help="Split generation into this many deterministic shards.")
+    parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard index handled by this process.")
     parser.add_argument("--migrate-only", action="store_true", help="Convert existing PNG files to WebP and stop.")
     parser.add_argument("--skip-migration", action="store_true", help="Skip the legacy PNG migration pass.")
     parser.add_argument("--port", type=int, default=7192, help="Temporary local renderer API port when --base-url is not reachable.")
@@ -79,13 +81,14 @@ def migrate_legacy_pngs(
     candidates = [
         output_root / entry.dataset / f"{entry.motion_id}.png"
         for entry in entries
-        if (dataset == "all" or entry.dataset == dataset)
-        and (output_root / entry.dataset / f"{entry.motion_id}.png").is_file()
+        if dataset == "all" or entry.dataset == dataset
     ]
 
     def migrate_one(png_path: Path) -> tuple[int, int, str | None]:
         webp_path = png_path.with_suffix(".webp")
         try:
+            if not png_path.is_file():
+                return 0, 0, None
             if not webp_path.is_file():
                 webp_path.parent.mkdir(parents=True, exist_ok=True)
                 with Image.open(png_path) as image:
@@ -110,15 +113,21 @@ def migrate_legacy_pngs(
 
 
 def candidate_entries(index: local_motion_query_api.MotionIndex, args: argparse.Namespace) -> list[local_motion_query_api.MotionEntry]:
+    eligible = [entry for entry in index.entries if args.dataset == "all" or entry.dataset == args.dataset]
+    eligible = eligible[args.shard_index :: args.shard_count]
+    if args.overwrite:
+        return eligible[: args.limit or None]
+
+    def is_missing(entry: local_motion_query_api.MotionEntry) -> bool:
+        return not preview_path(args.output_root, entry).is_file()
+
     entries = []
-    for entry in index.entries:
-        if args.dataset != "all" and entry.dataset != args.dataset:
-            continue
-        if preview_path(args.output_root, entry).is_file() and not args.overwrite:
-            continue
-        entries.append(entry)
-        if args.limit and len(entries) >= args.limit:
-            break
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        for entry, missing in zip(eligible, pool.map(is_missing, eligible)):
+            if missing:
+                entries.append(entry)
+                if args.limit and len(entries) >= args.limit:
+                    break
     return entries
 
 
@@ -146,6 +155,8 @@ def main() -> int:
     args = build_parser().parse_args()
     if not 1 <= args.quality <= 100:
         raise SystemExit("--quality must be between 1 and 100")
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        raise SystemExit("--shard-index must be between 0 and --shard-count - 1")
     index = local_motion_query_api.MotionIndex.from_jsonl(args.index.resolve(), cache_root=args.cache_dir.resolve())
     migration = {"converted": 0, "removed": 0, "failed": 0}
     if not args.skip_migration:
