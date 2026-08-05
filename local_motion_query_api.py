@@ -35,6 +35,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import Request, urlopen
 
 import motion_taxonomy
+from cache_manifest import CacheManifest
+from search_index import SearchIndex
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -399,13 +401,19 @@ class MotionEntry:
 
 
 class MotionIndex:
-    def __init__(self, *, source_path: Path, cache_root: Path, entries: list[MotionEntry]) -> None:
+    def __init__(self, *, source_path: Path, cache_root: Path, entries: list[MotionEntry], search_index_path: Path | None = None) -> None:
         self.source_path = source_path
         self.cache_root = cache_root
         self.entries = entries
         self.entries_by_id = {entry.object_id: entry for entry in entries}
         self._idf = self._build_idf(entries)
         self._average_length = sum(entry.token_length for entry in entries) / max(len(entries), 1)
+        search_path = search_index_path or source_path.with_suffix(".fts5.sqlite3")
+        self._search_index = SearchIndex(
+            search_path,
+            fingerprint=SearchIndex.fingerprint(source_path, len(entries)),
+            rows=((entry.object_id, " ".join(tokenize(entry.search_text))) for entry in entries),
+        )
         self._sorted_entries = sorted(entries, key=lambda entry: (entry.dataset, entry.motion_id))
         self.node_entry_ids: dict[str, set[str]] = {node_id: set() for node_id in motion_taxonomy.NODES_BY_ID}
         self.node_direct_entry_ids: dict[str, set[str]] = {node_id: set() for node_id in motion_taxonomy.NODES_BY_ID}
@@ -427,6 +435,7 @@ class MotionIndex:
         index_path: Path,
         cache_root: Path | None = None,
         taxonomy_assignments_path: Path | None = None,
+        search_index_path: Path | None = None,
     ) -> "MotionIndex":
         if not index_path.is_file():
             raise FileNotFoundError(f"Motion index does not exist: {index_path}")
@@ -448,7 +457,7 @@ class MotionIndex:
                     entries.append(entry)
         if not entries:
             raise RuntimeError(f"No usable motion entries found in: {index_path}")
-        return cls(source_path=index_path, cache_root=resolved_cache_root, entries=entries)
+        return cls(source_path=index_path, cache_root=resolved_cache_root, entries=entries, search_index_path=search_index_path)
 
     @staticmethod
     def _load_taxonomy_assignments(path: Path) -> dict[str, dict[str, Any]]:
@@ -521,11 +530,21 @@ class MotionIndex:
 
     def get_summary(self) -> dict[str, Any]:
         dataset_counts = Counter(entry.dataset for entry in self.entries)
-        cached_count = sum(1 for entry in self.entries if entry.cache_glb.is_file())
+        cached_dataset_counts = Counter(entry.dataset for entry in self.entries if entry.cache_glb.is_file())
+        cached_count = sum(cached_dataset_counts.values())
         return {
             "entry_count": len(self.entries),
             "dataset_counts": dict(sorted(dataset_counts.items())),
             "cached_model_count": cached_count,
+            "cached_dataset_counts": dict(sorted(cached_dataset_counts.items())),
+            "cache_coverage": {
+                dataset: {
+                    "cached": cached_dataset_counts.get(dataset, 0),
+                    "total": total,
+                    "ratio": round(cached_dataset_counts.get(dataset, 0) / max(total, 1), 4),
+                }
+                for dataset, total in sorted(dataset_counts.items())
+            },
             "index_path": str(self.source_path),
             "cache_root": str(self.cache_root),
         }
@@ -563,9 +582,11 @@ class MotionIndex:
         if not query_tokens:
             raise ValueError("Query text does not contain searchable tokens.")
         query_counts = Counter(query_tokens)
+        candidate_ids = self._search_index.candidates(query_tokens)
         scored = [
             (score, entry)
             for entry in self.entries
+            if entry.object_id in candidate_ids
             if (score := self._score_entry(normalized_query, query_counts, entry)) > 0
         ]
         scored.sort(key=lambda item: (-item[0], item[1].dataset, item[1].motion_id))
@@ -696,12 +717,17 @@ def ensure_cached_glb(
     converter_env: str | None,
     conda_exe: str,
     converter=convert_entry_to_glb,
+    manifest: CacheManifest | None = None,
 ) -> tuple[Path, bool]:
     if entry.cache_glb.is_file():
+        if manifest is not None:
+            manifest.record(entry.cache_glb, object_id=entry.object_id, dataset=entry.dataset, hit=True)
         return entry.cache_glb, False
     with lock:
         if entry.cache_glb.is_file():
-            return entry.cache_glb, False
+            if manifest is not None:
+                manifest.record(entry.cache_glb, object_id=entry.object_id, dataset=entry.dataset, hit=True)
+                return entry.cache_glb, False
         entry.cache_glb.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = entry.cache_glb.with_name(f"{entry.cache_glb.name}.tmp.{os.getpid()}.{threading.get_ident()}")
         try:
@@ -718,6 +744,8 @@ def ensure_cached_glb(
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
+        if manifest is not None:
+            manifest.record(entry.cache_glb, object_id=entry.object_id, dataset=entry.dataset, checksum=True)
         return entry.cache_glb, True
 
 
@@ -741,6 +769,7 @@ class MotionQueryServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, request_handler)
         self.motion_index = motion_index
+        self.cache_manifest = CacheManifest(motion_index.cache_root)
         self.model_dir = model_dir
         self.frame_step = frame_step
         self.interx_fps = interx_fps
@@ -1386,6 +1415,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 interx_fps=self.server.interx_fps,
                 converter_env=self.server.converter_env,
                 conda_exe=self.server.conda_exe,
+                manifest=self.server.cache_manifest,
             )
         except KeyboardInterrupt:
             raise

@@ -1,7 +1,7 @@
 import * as THREE from "/ui/static/vendor/three.module.js";
 import { GLTFLoader } from "/ui/static/vendor/GLTFLoader.js";
 
-const state = { offset: 0, limit: 9, total: 0, taxonomy: [], taxonomyNodes: [], taxonomySources: [], taxonomyQuery: "", hierarchy: [], facets: {}, filters: {}, items: [] };
+const state = { offset: 0, limit: 9, total: 0, taxonomy: [], taxonomyNodes: [], taxonomySources: [], taxonomyQuery: "", expandedNodes: new Set(), hierarchy: [], facets: {}, filters: {}, items: [] };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 
@@ -30,10 +30,14 @@ function renderTaxonomyFilters() {
   const selectedNode = state.filters.node_id || "";
   const renderNode = (node, depth = 0) => {
     const children = node.tags || [];
-    const button = `<button class="tree-node${selectedNode === node.id ? " selected" : ""}" type="button" data-node-id="${escapeHtml(node.id)}" style="--tree-depth:${depth}"><span>${escapeHtml(node.label)}</span><small>${Number(node.count || 0).toLocaleString()}</small></button>`;
-    if (!children.length) return button;
-    const open = depth === 0 || selectedNode === node.id || children.some((child) => nodeContains(child, selectedNode));
-    return `<details class="taxonomy-branch" ${open ? "open" : ""}><summary>${button}</summary><div class="taxonomy-children">${children.map((child) => renderNode(child, depth + 1)).join("")}</div></details>`;
+    const selected = selectedNode === node.id;
+    const open = state.expandedNodes.has(node.id) || nodeContains(node, selectedNode) || Boolean(state.taxonomyQuery);
+    const toggle = children.length
+      ? `<button class="tree-toggle" type="button" data-toggle-node="${escapeHtml(node.id)}" aria-label="${open ? "收起" : "展开"}" aria-expanded="${open}"><span aria-hidden="true">${open ? "−" : "+"}</span></button>`
+      : '<span class="tree-toggle-spacer" aria-hidden="true"></span>';
+    const button = `<button class="tree-node${selected ? " selected" : ""}" type="button" data-node-id="${escapeHtml(node.id)}" style="--tree-depth:${depth}"><span>${escapeHtml(node.label)}</span><small>${Number(node.count || 0).toLocaleString()}</small></button>`;
+    const nested = children.length && open ? `<div class="taxonomy-children">${children.map((child) => renderNode(child, depth + 1)).join("")}</div>` : "";
+    return `<div class="taxonomy-branch${open ? " expanded" : ""}"><div class="tree-row">${toggle}${button}</div>${nested}</div>`;
   };
   const treeHtml = `<section class="taxonomy-section"><h3>动作分类</h3><input class="taxonomy-search" type="search" value="${escapeHtml(state.taxonomyQuery)}" placeholder="搜索分类名称"><div class="taxonomy-tree">${hierarchy.length ? hierarchy.map((node) => renderNode(node)).join("") : '<p class="tree-empty">没有匹配的分类。</p>'}</div></section>`;
   const auxiliaryHtml = auxiliary.map((axis) => {
@@ -49,12 +53,13 @@ function renderTaxonomyFilters() {
     nextInput.focus();
     nextInput.setSelectionRange(nextInput.value.length, nextInput.value.length);
   });
-  root.querySelectorAll("summary .tree-node").forEach((button) => button.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    selectTaxonomyNode(button.dataset.nodeId);
+  root.querySelectorAll("[data-toggle-node]").forEach((button) => button.addEventListener("click", () => {
+    const nodeId = button.dataset.toggleNode;
+    if (state.expandedNodes.has(nodeId)) state.expandedNodes.delete(nodeId);
+    else state.expandedNodes.add(nodeId);
+    renderTaxonomyFilters();
   }));
-  root.querySelectorAll(".taxonomy-tree > .tree-node, .taxonomy-children > .tree-node").forEach((button) => button.addEventListener("click", () => selectTaxonomyNode(button.dataset.nodeId)));
+  root.querySelectorAll("[data-node-id]").forEach((button) => button.addEventListener("click", () => selectTaxonomyNode(button.dataset.nodeId)));
   root.querySelectorAll("[data-axis]").forEach((button) => button.addEventListener("click", () => {
     const { axis, value } = button.dataset;
     if (axis === "action_category" && state.filters.action_category === value) {
@@ -158,9 +163,9 @@ function renderCards(items) {
     const model = item.model || {};
     const frames = item.frame_count ? `${Number(item.frame_count).toLocaleString()} 帧` : "帧数未知";
     return `<article class="motion-card${item.cached ? " cached" : ""}">
-      <div class="card-preview" data-card-preview="${index}"><span>${item.cached ? "读取第一帧" : "生成 GLB 后显示"}</span></div>
+      <div class="card-preview" data-card-preview="${index}"><span>${item.preview?.available ? "读取预览" : item.cached ? "读取第一帧" : "点击播放后生成"}</span></div>
       <div class="card-body">
-        <div class="card-top"><span>${escapeHtml(item.dataset)} · ${escapeHtml(item.motion_id)}</span><span>${item.cached ? "已缓存" : "懒生成"}</span></div>
+        <div class="card-top"><span>${escapeHtml(item.dataset)} · ${escapeHtml(item.motion_id)}</span><span>${item.cached ? "已缓存" : "点击后缓存"}</span></div>
         <h3>${escapeHtml(item.description || item.motion_id)}</h3>
         <p class="description">${escapeHtml((item.captions || []).join(" / "))}</p>
         <div class="tags">${tagsFor(item)}<span class="tag">${frames}</span></div>
@@ -183,7 +188,7 @@ function renderCardPreviews(items) {
   cardPreviewQueue.running = 0;
   items.forEach((item, index) => {
     const target = document.querySelector(`[data-card-preview="${index}"]`);
-    if (!target || !item?.model?.download_url) return;
+    if (!target || (!item?.model?.download_url && !item?.preview?.download_url)) return;
     cardPreviewQueue.jobs.push(() => renderOneCardPreview(item, target));
   });
   pumpCardPreviewQueue();
@@ -204,6 +209,10 @@ function renderOneCardPreview(item, target) {
   return new Promise((resolve) => {
     if (item.preview && item.preview.available && item.preview.download_url) {
       target.innerHTML = `<img src="${escapeHtml(item.preview.download_url)}" alt="${escapeHtml(item.motion_id)} 预览图" loading="lazy">`;
+      return resolve();
+    }
+    if (!item.cached) {
+      target.innerHTML = "<span>点击“播放完整”后生成预览</span>";
       return resolve();
     }
     target.innerHTML = `<span>${item.cached ? "读取中间帧" : "正在生成 GLB"}</span>`;
@@ -310,7 +319,9 @@ async function loadLibrary() {
   renderPager();
   $("#resultTitle").textContent = `动作结果 · ${state.total}`;
   const summary = payload.summary || {};
-  $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 / ${Number(summary.cached_model_count || 0).toLocaleString()} 已缓存`;
+  const coverage = summary.cache_coverage || {};
+  const cachedText = Object.entries(coverage).map(([dataset, values]) => `${dataset} ${Number(values.cached || 0).toLocaleString()}/${Number(values.total || 0).toLocaleString()}`).join(" · ");
+  $("#statusBadge").textContent = `${Number(summary.entry_count || state.total).toLocaleString()} 条索引 · ${cachedText || `${Number(summary.cached_model_count || 0).toLocaleString()} 个 GLB`}`;
 }
 
 function setViewerStatus(text) { $("#viewerStatus").textContent = text; }

@@ -21,3 +21,7 @@ client_output/
 dataset/*.tmp
 dataset/*_cache/
 frpc_api.runtime.ini
+
+*.fts5.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

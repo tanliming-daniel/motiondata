@@ -14,6 +14,7 @@ API 现在会优先对短中文关键词直接走 alias，对较长中文描述�
 - `query_api_client.py`: 查询并下载模型的客户端。
 - `build_motion_index.py`: 重新生成 `dataset/motion_index.jsonl`。
 - `build_taxonomy_assignments.py`: 使用可追溯规则预计算动作分类映射和覆盖报告。
+- `precache_motionxpp.py`: 按数量上限和磁盘保留空间批量预缓存 Motion-X++ GLB。
 - `taxonomy/catalog.json`: 版本化的中英双语动作目录、别名和来源引用。
 - `taxonomy/sources.json`: WHO ICF、FIG、O*NET、ISCO 等分类来源元数据。
 - `start_api_server.sh`: 启动本地 API，默认端口 `7091`。
@@ -274,6 +275,14 @@ python3 build_taxonomy_assignments.py
 - `dataset/motion_taxonomy_report.json`: 分类数量、未分类率、节点分布和待审样例。
 
 分类过程不调用生成式模型。它使用完整短语、词边界、词形归一和规则优先级；无法可靠识别的素材会保持未分类。
+
+Motion-X++ GLB 较大，推荐使用受限批量预缓存：
+
+```bash
+python3 precache_motionxpp.py --limit 100 --reserve-gib 20
+```
+
+脚本只生成缺失文件，达到目标数量或剩余空间低于保留阈值就停止；单个动作仍可通过播放或下载接口按需生成。
 
 ## 分类目录 API
 
