@@ -7,20 +7,30 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.cache/
 .coverage
 htmlcov/
 .venv/
 venv/
 env/
 .DS_Store
+*.swp
+*.swo
+*~
 
 # Repository-specific generated artifacts
 cache/models/
 cache/previews/
 client_output/
 dataset/*.tmp
+dataset/*.bak
+dataset/*.before_*.jsonl
 dataset/*_cache/
-frpc_api.runtime.ini
+dataset/semantic_index/
+dataset/taxonomy_model/
+dataset/motion_taxonomy_review.jsonl
+runtime/*
+!runtime/.gitkeep
 
 *.fts5.sqlite3
 *.sqlite3-wal

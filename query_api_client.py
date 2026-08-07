@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 
-DEFAULT_BASE_URL = "http://127.0.0.1:7081"
+DEFAULT_BASE_URL = "http://127.0.0.1:7091"
 
 
 class ApiClientError(RuntimeError):

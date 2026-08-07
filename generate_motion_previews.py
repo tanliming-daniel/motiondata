@@ -5,6 +5,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -12,12 +13,16 @@ from typing import Any
 from urllib.parse import quote
 
 from PIL import Image
-from playwright.sync_api import sync_playwright
 
 import local_motion_query_api
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_ROOT = Path("/mnt/nas/cy/humanmotion/multimotion_previews")
+PREVIEW_SAMPLE_SIZE = (32, 20)
+MIN_PREVIEW_CHANNEL_RANGE = 12
+MIN_PREVIEW_FOREGROUND_DELTA = 18
+MIN_PREVIEW_FOREGROUND_RATIO = 0.02
+MAX_AUDIT_SAMPLES = 50
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard index handled by this process.")
     parser.add_argument("--migrate-only", action="store_true", help="Convert existing PNG files to WebP and stop.")
     parser.add_argument("--skip-migration", action="store_true", help="Skip the legacy PNG migration pass.")
+    parser.add_argument("--object-id", dest="object_ids", action="append", default=[], help="Generate only this object ID. Repeat for multiple IDs.")
+    parser.add_argument("--audit-existing", action="store_true", help="Decode and validate existing previews without generating files.")
+    parser.add_argument("--repair-invalid", action="store_true", help="Audit previews and regenerate only missing or invalid files.")
     parser.add_argument("--port", type=int, default=7192, help="Temporary local renderer API port when --base-url is not reachable.")
     return parser
 
@@ -70,6 +78,113 @@ def preview_path(output_root: Path, entry: local_motion_query_api.MotionEntry) -
     return output_root / entry.dataset / f"{entry.motion_id}.webp"
 
 
+def validate_preview_file(
+    path: Path,
+    *,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+) -> str | None:
+    if not path.is_file():
+        return "missing"
+    if path.stat().st_size == 0:
+        return "empty"
+    try:
+        with Image.open(path) as image:
+            image.load()
+            if image.format != "WEBP":
+                return "invalid_format"
+            if expected_width is not None and image.width != expected_width:
+                return "wrong_dimensions"
+            if expected_height is not None and image.height != expected_height:
+                return "wrong_dimensions"
+            sample = image.convert("RGB").resize(PREVIEW_SAMPLE_SIZE)
+            channel_range = max(high - low for low, high in sample.getextrema())
+            pixels = list(sample.getdata())
+            corner_pixels = [pixels[0], pixels[PREVIEW_SAMPLE_SIZE[0] - 1], pixels[-PREVIEW_SAMPLE_SIZE[0]], pixels[-1]]
+            background = tuple(sorted(pixel[channel] for pixel in corner_pixels)[len(corner_pixels) // 2] for channel in range(3))
+            foreground_ratio = sum(
+                1 for pixel in pixels
+                if max(abs(pixel[channel] - background[channel]) for channel in range(3)) >= MIN_PREVIEW_FOREGROUND_DELTA
+            ) / len(pixels)
+            if channel_range < MIN_PREVIEW_CHANNEL_RANGE or foreground_ratio < MIN_PREVIEW_FOREGROUND_RATIO:
+                return "blank"
+    except Exception:
+        return "corrupt"
+    return None
+
+
+def quick_preview_issue(path: Path) -> str | None:
+    if not path.is_file():
+        return "missing"
+    try:
+        if path.stat().st_size < 16:
+            return "empty"
+        with path.open("rb") as handle:
+            header = handle.read(12)
+    except OSError:
+        return "unreadable"
+    if header[:4] != b"RIFF" or header[8:12] != b"WEBP":
+        return "invalid_format"
+    return None
+
+
+def save_webp_atomically(
+    image: Image.Image,
+    output_path: Path,
+    *,
+    quality: int,
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".webp", delete=False) as handle:
+        temporary_webp = Path(handle.name)
+    try:
+        image.convert("RGB").save(temporary_webp, "WEBP", quality=quality, method=6)
+        issue = validate_preview_file(
+            temporary_webp,
+            expected_width=expected_width,
+            expected_height=expected_height,
+        )
+        if issue:
+            raise RuntimeError(f"Generated preview failed validation: {issue}")
+        os.replace(temporary_webp, output_path)
+    finally:
+        temporary_webp.unlink(missing_ok=True)
+
+
+def audit_previews(
+    output_root: Path,
+    entries: list[local_motion_query_api.MotionEntry],
+    *,
+    width: int,
+    height: int,
+    workers: int,
+) -> tuple[dict[str, Any], list[local_motion_query_api.MotionEntry]]:
+    def inspect(entry: local_motion_query_api.MotionEntry) -> tuple[local_motion_query_api.MotionEntry, str | None]:
+        return entry, validate_preview_file(preview_path(output_root, entry), expected_width=width, expected_height=height)
+
+    counts: dict[str, int] = {"valid": 0, "missing": 0, "empty": 0, "invalid_format": 0, "wrong_dimensions": 0, "blank": 0, "corrupt": 0}
+    invalid_entries: list[local_motion_query_api.MotionEntry] = []
+    samples: list[dict[str, str]] = []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for entry, issue in pool.map(inspect, entries, chunksize=64):
+            if issue is None:
+                counts["valid"] += 1
+                continue
+            counts[issue] = counts.get(issue, 0) + 1
+            invalid_entries.append(entry)
+            if len(samples) < MAX_AUDIT_SAMPLES:
+                samples.append({"object_id": entry.object_id, "dataset": entry.dataset, "motion_id": entry.motion_id, "issue": issue})
+    return {
+        "checked": len(entries),
+        "valid": counts.pop("valid"),
+        "invalid": len(invalid_entries),
+        "issues": counts,
+        "samples": samples,
+    }, invalid_entries
+
+
 def migrate_legacy_pngs(
     output_root: Path,
     entries: list[local_motion_query_api.MotionEntry],
@@ -89,10 +204,9 @@ def migrate_legacy_pngs(
         try:
             if not png_path.is_file():
                 return 0, 0, None
-            if not webp_path.is_file():
-                webp_path.parent.mkdir(parents=True, exist_ok=True)
+            if quick_preview_issue(webp_path):
                 with Image.open(png_path) as image:
-                    image.convert("RGB").save(webp_path, "WEBP", quality=quality, method=6)
+                    save_webp_atomically(image, webp_path, quality=quality)
                 converted = 1
             else:
                 converted = 0
@@ -114,12 +228,18 @@ def migrate_legacy_pngs(
 
 def candidate_entries(index: local_motion_query_api.MotionIndex, args: argparse.Namespace) -> list[local_motion_query_api.MotionEntry]:
     eligible = [entry for entry in index.entries if args.dataset == "all" or entry.dataset == args.dataset]
+    if args.object_ids:
+        selected = set(args.object_ids)
+        eligible = [entry for entry in eligible if entry.object_id in selected]
     eligible = eligible[args.shard_index :: args.shard_count]
     if args.overwrite:
         return eligible[: args.limit or None]
 
     def is_missing(entry: local_motion_query_api.MotionEntry) -> bool:
-        return not preview_path(args.output_root, entry).is_file()
+        path = preview_path(args.output_root, entry)
+        if args.object_ids:
+            return validate_preview_file(path, expected_width=args.width, expected_height=args.height) is not None
+        return quick_preview_issue(path) is not None
 
     entries = []
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
@@ -140,13 +260,19 @@ def render_preview(page: Any, base_url: str, entry: local_motion_query_api.Motio
     if status != "ready":
         message = page.evaluate("window.__PREVIEW_ERROR__")
         raise RuntimeError(message or "renderer failed")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
         temporary_png = Path(handle.name)
     try:
         page.locator("canvas").screenshot(path=str(temporary_png))
         with Image.open(temporary_png) as image:
-            image.convert("RGB").save(output_path, "WEBP", quality=quality, method=6)
+            save_webp_atomically(
+                image,
+                output_path,
+                quality=quality,
+                expected_width=width,
+                expected_height=height,
+            )
+        output_path.with_suffix(output_path.suffix + ".canonical-v2").write_text("canonical-v2\n", encoding="ascii")
     finally:
         temporary_png.unlink(missing_ok=True)
 
@@ -157,18 +283,49 @@ def main() -> int:
         raise SystemExit("--quality must be between 1 and 100")
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise SystemExit("--shard-index must be between 0 and --shard-count - 1")
+    if args.migrate_only and (args.audit_existing or args.repair_invalid):
+        raise SystemExit("--migrate-only cannot be combined with --audit-existing or --repair-invalid")
     index = local_motion_query_api.MotionIndex.from_jsonl(args.index.resolve(), cache_root=args.cache_dir.resolve())
+    if args.object_ids:
+        known_ids = set(index.entries_by_id)
+        unknown_ids = sorted(set(args.object_ids).difference(known_ids))
+        if unknown_ids:
+            raise SystemExit(f"Unknown object IDs: {', '.join(unknown_ids)}")
+    selected_entries = [entry for entry in index.entries if args.dataset == "all" or entry.dataset == args.dataset]
+    if args.object_ids:
+        selected_ids = set(args.object_ids)
+        selected_entries = [entry for entry in selected_entries if entry.object_id in selected_ids]
+    selected_entries = selected_entries[args.shard_index :: args.shard_count]
+
     migration = {"converted": 0, "removed": 0, "failed": 0}
-    if not args.skip_migration:
+    if not args.skip_migration and not (args.audit_existing or args.repair_invalid):
         migration = migrate_legacy_pngs(args.output_root, index.entries, dataset=args.dataset, workers=args.workers, quality=args.quality)
     if args.migrate_only:
         print(json.dumps({"migration": migration}, ensure_ascii=False, indent=2))
         return 1 if migration["failed"] else 0
-    entries = candidate_entries(index, args)
-    summary = {"migration": migration, "candidate_count": len(entries), "generated": 0, "failed": 0, "failures": []}
+
+    audit = None
+    if args.audit_existing or args.repair_invalid:
+        audit, invalid_entries = audit_previews(
+            args.output_root,
+            selected_entries,
+            width=args.width,
+            height=args.height,
+            workers=args.workers,
+        )
+        if args.audit_existing and not args.repair_invalid:
+            print(json.dumps({"audit": audit}, ensure_ascii=False, indent=2))
+            return 1 if audit["invalid"] else 0
+        entries = invalid_entries[: args.limit or None]
+    else:
+        entries = candidate_entries(index, args)
+
+    summary = {"migration": migration, "audit": audit, "candidate_count": len(entries), "generated": 0, "failed": 0, "failures": []}
     if not entries:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
+
+    from playwright.sync_api import sync_playwright
 
     with temporary_server(index, args) as base_url:
         with sync_playwright() as p:

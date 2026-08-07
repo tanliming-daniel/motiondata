@@ -19,19 +19,23 @@
       <input id="searchInput" type="search" autocomplete="off" placeholder="搜索动作，例如：握手、瑜伽、walk">
     </label>
     <div class="header-meta">
-      <span id="statusBadge" class="status-pill">读取中</span>
-      <button id="filterToggle" class="toolbar-button" type="button" aria-controls="filtersPanel" aria-expanded="true">筛选</button>
-      <a href="/api/v1/health" target="_blank" rel="noopener">API</a>
+      <span id="statusBadge" class="status-pill">总数据读取中</span>
+      <button id="filterToggle" class="button button-secondary" type="button" aria-controls="filtersPanel" aria-expanded="true">筛选</button>
+      <div class="view-switch" aria-label="页面视图">
+        <button id="libraryViewButton" type="button" aria-pressed="true">动作库</button>
+        <button id="taxonomyViewButton" type="button" aria-pressed="false">分类树</button>
+      </div>
+      <a class="button button-ghost" href="/api/v1/health" target="_blank" rel="noopener">API</a>
     </div>
   </header>
 
-  <main class="workspace">
+  <main id="libraryView" class="workspace">
     <aside id="filtersPanel" class="filters" aria-label="动作筛选">
       <div class="filter-title">
         <div><p class="eyebrow">FILTER</p><h2>分类检索</h2></div>
         <div class="filter-title-actions">
-          <button id="clearFilters" type="button">清空</button>
-          <button id="closeFilters" class="icon-button mobile-only" type="button" aria-label="关闭筛选">×</button>
+          <button id="clearFilters" class="button button-ghost" type="button">清空</button>
+          <button id="closeFilters" class="button button-icon mobile-only" type="button" aria-label="关闭筛选">×</button>
         </div>
       </div>
       <section>
@@ -54,14 +58,32 @@
       </div>
       <div id="activeFilters" class="active-filters hidden" aria-label="当前筛选条件"></div>
       <section id="taxonomyDetail" class="taxonomy-detail hidden" aria-live="polite"></section>
+      <div id="libraryNotice" class="library-notice hidden" role="status"></div>
       <div id="resultGrid" class="result-grid"><article class="empty">正在读取动作索引...</article></div>
       <div id="pager" class="pager hidden">
-        <button id="prevPage" type="button">上一页</button>
+        <button id="prevPage" class="button button-secondary" type="button">上一页</button>
         <span id="pageText"></span>
-        <button id="nextPage" type="button">下一页</button>
+        <button id="nextPage" class="button button-secondary" type="button">下一页</button>
       </div>
     </section>
 
+  </main>
+
+  <main id="taxonomyView" class="asset-taxonomy-view hidden" aria-live="polite">
+    <div class="asset-taxonomy-head">
+      <div><p class="eyebrow">ACTION TAXONOMY</p><h2>动作资产分类树</h2></div>
+      <div class="asset-taxonomy-stats" aria-label="分类统计">
+        <span><strong id="taxonomyMajorCount">-</strong> 一级</span>
+        <span><strong id="taxonomyGroupCount">-</strong> 二级</span>
+        <span><strong id="taxonomyTagCount">-</strong> 三级</span>
+      </div>
+    </div>
+    <div class="asset-taxonomy-toolbar">
+      <input id="assetTaxonomySearch" type="search" placeholder="搜索大类、动作组或动作标签" aria-label="搜索动作分类">
+      <button id="assetTaxonomyExpand" class="button button-secondary" type="button">全部展开</button>
+      <button id="assetTaxonomyCollapse" class="button button-secondary" type="button">全部收起</button>
+    </div>
+    <div id="assetTaxonomyTree" class="asset-taxonomy-tree"><div class="empty">分类目录读取中...</div></div>
   </main>
 
   <button id="filterScrim" class="scrim filter-scrim" type="button" aria-label="关闭筛选"></button>
@@ -70,14 +92,14 @@
   <aside id="viewerDrawer" class="viewer-drawer" role="dialog" aria-modal="true" aria-label="动作详情" aria-hidden="true" inert>
       <div class="viewer-head">
         <div><p class="eyebrow">MOTION DETAIL</p><h2 id="viewerTitle">动作详情</h2></div>
-        <button id="closeViewer" class="icon-button" type="button" aria-label="关闭动作详情">×</button>
+        <button id="closeViewer" class="button button-icon" type="button" aria-label="关闭动作详情">×</button>
       </div>
       <div id="viewerStatus" class="viewer-status">选择动作后生成可交互的 3D 预览。</div>
       <div id="viewerCanvas" class="viewer-canvas"></div>
       <div id="viewerMeta" class="viewer-meta"></div>
       <div class="viewer-actions">
-        <button id="retryViewer" class="secondary-button hidden" type="button">重试</button>
-        <a id="downloadLink" class="download-link disabled" href="#">下载 GLB</a>
+        <button id="retryViewer" class="button button-secondary hidden" type="button">重试</button>
+        <a id="downloadLink" class="button button-primary download-link disabled" href="#">下载 GLB</a>
       </div>
   </aside>
 

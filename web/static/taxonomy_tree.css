@@ -39,6 +39,11 @@
   color: #18202a;
 }
 
+.tree-toggle:focus-visible,
+.tree-node:focus-visible {
+  outline-offset: -2px;
+}
+
 .tree-toggle-spacer {
   pointer-events: none;
 }

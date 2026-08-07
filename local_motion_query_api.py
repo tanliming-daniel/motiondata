@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+import ast
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
+import gzip
 import hashlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,9 +23,11 @@ import random
 import re
 import shutil
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
+import time
 from typing import Any
 
 
@@ -37,7 +41,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import Request, urlopen
 
 import motion_taxonomy
-from search_index import SearchIndex
+from search_index import SearchIndex, SemanticRetriever
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -54,14 +58,16 @@ DEFAULT_SMPLX_MODEL_DIR = MULTIMOTION_DIR / "models" / "smplx"
 DEFAULT_CONVERTER_ENV = "sam2dam2"
 DEFAULT_CONDA_EXE = "conda"
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 7081
+DEFAULT_PORT = 7091
 DEFAULT_FRAME_STEP = 1
 DEFAULT_INTERX_FPS = 30.0
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+FACET_CACHE_SIZE = 128
 API_PREFIX = "/api/v1"
 OPENAPI_PATH = "/openapi.json"
 LOCAL_ENCODER_NAME = "local_motion_lexical_bm25_v1"
+HYBRID_ENCODER_NAME = "local_motion_hybrid_rrf_v1"
 DEFAULT_SEARCH_RANDOMNESS = 0.12
 DEFAULT_TRANSLATION_TIMEOUT_SECONDS = 8.0
 MODEL_CONTENT_TYPE = "model/gltf-binary"
@@ -190,12 +196,80 @@ def normalize_whitespace(text: str) -> str:
     return " ".join(text.strip().split())
 
 
+def read_npy_header(handle: Any) -> dict[str, Any] | None:
+    if handle.read(6) != b"\x93NUMPY":
+        return None
+    version = handle.read(2)
+    if len(version) != 2:
+        return None
+    length_size = 2 if version[0] == 1 else 4
+    length_bytes = handle.read(length_size)
+    if len(length_bytes) != length_size:
+        return None
+    header_length = struct.unpack("<H" if length_size == 2 else "<I", length_bytes)[0]
+    if header_length > 1_048_576:
+        return None
+    header = ast.literal_eval(handle.read(header_length).decode("latin1"))
+    return header if isinstance(header, dict) else None
+
+
+def read_npy_frame_count(path: Path) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            header = read_npy_header(handle)
+        shape = header.get("shape") if isinstance(header, dict) else None
+        return int(shape[0]) if isinstance(shape, tuple) and shape and int(shape[0]) > 0 else None
+    except (OSError, UnicodeDecodeError, ValueError, SyntaxError, struct.error):
+        return None
+
+
+def read_npy_preview_rotation(path: Path) -> float:
+    try:
+        with path.open("rb") as handle:
+            header = read_npy_header(handle)
+            if not header or header.get("fortran_order"):
+                return 0.0
+            descr = str(header.get("descr") or "")
+            if descr not in {"<f4", ">f4", "=f4", "|f4"}:
+                return 0.0
+            root_orient = struct.unpack(">3f" if descr == ">f4" else "<3f", handle.read(12))
+        angle = math.sqrt(sum(value * value for value in root_orient))
+        if angle < 1e-8:
+            source_up_x, source_up_z = 0.0, 0.0
+        else:
+            axis_x, axis_y, axis_z = (value / angle for value in root_orient)
+            sine, cosine = math.sin(angle), math.cos(angle)
+            source_up_x = -axis_z * sine + axis_x * axis_y * (1.0 - cosine)
+            source_up_z = axis_x * sine + axis_z * axis_y * (1.0 - cosine)
+        rotation = -math.degrees(math.atan2(source_up_x, source_up_z))
+        return 0.0 if abs(rotation) < 8.0 else round(rotation, 2)
+    except (OSError, UnicodeDecodeError, ValueError, SyntaxError, struct.error):
+        return 0.0
+
+
 def normalize_route_path(path: str) -> str:
     if not path:
         return "/"
     if path == "/":
         return path
     return path.rstrip("/") or "/"
+
+
+def is_usable_preview_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        if path.stat().st_size < 16:
+            return False
+        with path.open("rb") as handle:
+            header = handle.read(16)
+    except OSError:
+        return False
+    if path.suffix.lower() == ".webp":
+        return header[:4] == b"RIFF" and header[8:12] == b"WEBP"
+    if path.suffix.lower() == ".png":
+        return header.startswith(b"\x89PNG\r\n\x1a\n")
+    return False
 
 
 def contains_cjk(text: str) -> bool:
@@ -408,6 +482,9 @@ class MotionIndex:
         self.cache_root = cache_root
         self.entries = entries
         self.entries_by_id = {entry.object_id: entry for entry in entries}
+        self._frame_count_cache: dict[str, int | None] = {}
+        self._frame_count_lock = threading.Lock()
+        self._preview_rotation_cache: dict[str, float] = {}
         self._idf = self._build_idf(entries)
         self._average_length = sum(entry.token_length for entry in entries) / max(len(entries), 1)
         search_path = search_index_path or source_path.with_suffix(".fts5.sqlite3")
@@ -417,19 +494,108 @@ class MotionIndex:
             rows=((entry.object_id, " ".join(tokenize(entry.search_text))) for entry in entries),
         )
         self._sorted_entries = sorted(entries, key=lambda entry: (entry.dataset, entry.motion_id))
+        self.entry_positions = {entry.object_id: index for index, entry in enumerate(entries)}
+        self.all_entry_mask = (1 << len(entries)) - 1
+        self.all_entry_ids = {entry.object_id for entry in entries}
+        self.dataset_entry_ids: dict[str, set[str]] = {}
+        self.axis_entry_ids: dict[str, dict[str, set[str]]] = {
+            axis: {} for axis in motion_taxonomy.AXIS_ORDER
+        }
         self.node_entry_ids: dict[str, set[str]] = {node_id: set() for node_id in motion_taxonomy.NODES_BY_ID}
         self.node_direct_entry_ids: dict[str, set[str]] = {node_id: set() for node_id in motion_taxonomy.NODES_BY_ID}
         self.node_direct_counts: Counter[str] = Counter()
+        default_facets: dict[str, Counter[str]] = {axis: Counter() for axis in motion_taxonomy.AXIS_ORDER}
+        default_facets["dataset"] = Counter()
+        default_facets["action_node"] = Counter()
+        default_facets["action_node_direct"] = Counter()
+        self.library_classifications: dict[str, dict[str, Any]] = {}
         for entry in entries:
             classification = motion_taxonomy.classify_motion(entry)
+            self.library_classifications[entry.object_id] = classification
+            self.dataset_entry_ids.setdefault(entry.dataset, set()).add(entry.object_id)
+            default_facets["dataset"][entry.dataset] += 1
+            for axis, value in classification["taxonomy"].items():
+                self.axis_entry_ids[axis].setdefault(value, set()).add(entry.object_id)
+                default_facets[axis][value] += 1
             direct_ids = {str(node["id"]) for node in classification.get("action_nodes") or ()}
+            aggregate_ids: set[str] = set()
             for node_id in direct_ids:
                 self.node_direct_counts[node_id] += 1
                 self.node_direct_entry_ids[node_id].add(entry.object_id)
+                default_facets["action_node_direct"][node_id] += 1
                 current_id: str | None = node_id
                 while current_id:
                     self.node_entry_ids[current_id].add(entry.object_id)
+                    aggregate_ids.add(current_id)
                     current_id = motion_taxonomy.NODES_BY_ID[current_id].get("parent_id")
+            for node_id in aggregate_ids:
+                default_facets["action_node"][node_id] += 1
+        self.default_library_facets = {axis: dict(counter) for axis, counter in default_facets.items()}
+        self.default_library_hierarchy = motion_taxonomy.taxonomy_payload(
+            counts=self.default_library_facets["action_node"],
+            direct_counts=self.default_library_facets["action_node_direct"],
+        ).get("hierarchy", [])
+        self.dataset_entry_masks = {
+            key: self.ids_to_mask(entry_ids) for key, entry_ids in self.dataset_entry_ids.items()
+        }
+        self.axis_entry_masks = {
+            axis: {key: self.ids_to_mask(entry_ids) for key, entry_ids in values.items()}
+            for axis, values in self.axis_entry_ids.items()
+        }
+        self.node_entry_masks = {
+            node_id: self.ids_to_mask(entry_ids) for node_id, entry_ids in self.node_entry_ids.items()
+        }
+        self.node_direct_entry_masks = {
+            node_id: self.ids_to_mask(entry_ids) for node_id, entry_ids in self.node_direct_entry_ids.items()
+        }
+        self.visible_node_ids = tuple(
+            node["id"] for node in motion_taxonomy.NODES if node.get("asset_taxonomy") and not node.get("legacy_only")
+        )
+        self._facet_cache: OrderedDict[tuple[Any, ...], dict[str, dict[str, int]]] = OrderedDict()
+        self._facet_cache_lock = threading.Lock()
+
+    def ids_to_mask(self, entry_ids: set[str]) -> int:
+        mask = 0
+        for object_id in entry_ids:
+            position = self.entry_positions.get(object_id)
+            if position is not None:
+                mask |= 1 << position
+        return mask
+
+    def entries_to_mask(self, entries: list[MotionEntry]) -> int:
+        mask = 0
+        for entry in entries:
+            position = self.entry_positions.get(entry.object_id)
+            if position is not None:
+                mask |= 1 << position
+        return mask
+
+    def mask_contains(self, mask: int, entry: MotionEntry) -> bool:
+        position = self.entry_positions.get(entry.object_id)
+        return position is not None and bool(mask & (1 << position))
+
+    def entries_from_mask(self, mask: int) -> list[MotionEntry]:
+        result: list[MotionEntry] = []
+        while mask:
+            least_significant_bit = mask & -mask
+            position = least_significant_bit.bit_length() - 1
+            result.append(self.entries[position])
+            mask ^= least_significant_bit
+        return result
+
+    def get_cached_facets(self, key: tuple[Any, ...]) -> dict[str, dict[str, int]] | None:
+        with self._facet_cache_lock:
+            value = self._facet_cache.get(key)
+            if value is not None:
+                self._facet_cache.move_to_end(key)
+            return value
+
+    def cache_facets(self, key: tuple[Any, ...], value: dict[str, dict[str, int]]) -> None:
+        with self._facet_cache_lock:
+            self._facet_cache[key] = value
+            self._facet_cache.move_to_end(key)
+            while len(self._facet_cache) > FACET_CACHE_SIZE:
+                self._facet_cache.popitem(last=False)
 
     @classmethod
     def from_jsonl(
@@ -519,6 +685,30 @@ class MotionIndex:
         aggregate = {node_id: len(entry_ids) for node_id, entry_ids in self.node_entry_ids.items()}
         return aggregate, dict(self.node_direct_counts)
 
+    def frame_count_for(self, entry: MotionEntry) -> int | None:
+        if entry.frame_count is not None:
+            return entry.frame_count
+        if entry.dataset != "motionxpp":
+            return None
+        with self._frame_count_lock:
+            if entry.object_id in self._frame_count_cache:
+                return self._frame_count_cache[entry.object_id]
+        value = read_npy_frame_count(entry.source_motion)
+        with self._frame_count_lock:
+            self._frame_count_cache[entry.object_id] = value
+        return value
+
+    def preview_rotation_for(self, entry: MotionEntry) -> float:
+        if entry.dataset != "motionxpp":
+            return 0.0
+        with self._frame_count_lock:
+            if entry.object_id in self._preview_rotation_cache:
+                return self._preview_rotation_cache[entry.object_id]
+        value = read_npy_preview_rotation(entry.source_motion)
+        with self._frame_count_lock:
+            self._preview_rotation_cache[entry.object_id] = value
+        return value
+
     @staticmethod
     def _build_idf(entries: list[MotionEntry]) -> dict[str, float]:
         document_frequency: Counter[str] = Counter()
@@ -583,6 +773,40 @@ class MotionIndex:
         if top_k is None:
             return scored
         return scored[: max(top_k, 1)]
+
+    def search_hybrid(
+        self,
+        query_text: str,
+        semantic: SemanticRetriever,
+        top_k: int | None = None,
+        candidate_k: int = 300,
+        semantic_query: str | None = None,
+    ) -> list[tuple[float, MotionEntry, dict[str, Any]]]:
+        lexical = self.search_entries(query_text, top_k=candidate_k)
+        dense = semantic.search(semantic_query or query_text, top_k=candidate_k)
+        lexical_rank = {entry.object_id: rank for rank, (_score, entry) in enumerate(lexical, 1)}
+        lexical_score = {entry.object_id: score for score, entry in lexical}
+        dense_by_id: dict[str, tuple[int, float, str]] = {}
+        for rank, (score, row) in enumerate(dense, 1):
+            object_id = str(row.get("object_id") or "")
+            if object_id and object_id not in dense_by_id:
+                dense_by_id[object_id] = (rank, score, str(row.get("caption") or ""))
+        rows: list[tuple[float, MotionEntry, dict[str, Any]]] = []
+        for object_id in set(lexical_rank) | set(dense_by_id):
+            entry = self.entries_by_id.get(object_id)
+            if entry is None:
+                continue
+            lrank = lexical_rank.get(object_id)
+            drank, dscore, matched = dense_by_id.get(object_id, (None, 0.0, ""))
+            fused = (0.45 / (60 + lrank) if lrank else 0.0) + (0.55 / (60 + drank) if drank else 0.0)
+            detail = {
+                "lexical_score": lexical_score.get(object_id, 0.0),
+                "semantic_score": dscore,
+                "matched_caption": matched,
+            }
+            rows.append((fused, entry, detail))
+        rows.sort(key=lambda item: (-item[0], item[1].dataset, item[1].motion_id))
+        return rows[: max(top_k, 1)] if top_k is not None else rows
 
     def _score_entry(self, normalized_query: str, query_counts: Counter[str], entry: MotionEntry) -> float:
         k1 = 1.5
@@ -745,6 +969,10 @@ class MotionQueryServer(ThreadingHTTPServer):
         translation_model: str | None = None,
         translation_device: int = DEFAULT_LOCAL_TRANSLATION_DEVICE,
         translation_max_length: int = DEFAULT_LOCAL_TRANSLATION_MAX_LENGTH,
+        semantic_model: str | None = None,
+        semantic_index: Path | None = None,
+        semantic_device: str = "auto",
+        semantic_max_length: int = 256,
     ) -> None:
         super().__init__(server_address, request_handler)
         self.motion_index = motion_index
@@ -770,6 +998,12 @@ class MotionQueryServer(ThreadingHTTPServer):
         self.translation_device = translation_device
         self.translation_max_length = max(1, translation_max_length)
         self.translation_timeout = max(0.1, translation_timeout)
+        self.semantic_model = normalize_whitespace(semantic_model or "") or None
+        self.semantic_index = (semantic_index or SCRIPT_DIR / "dataset" / "semantic_index").expanduser().resolve()
+        self.semantic_device = semantic_device
+        self.semantic_max_length = semantic_max_length
+        self._semantic_retriever: SemanticRetriever | None = None
+        self._semantic_lock = threading.Lock()
         self._translator: LocalTranslator | None = None
         self._translator_lock = threading.Lock()
         self._lock_guard = threading.Lock()
@@ -794,6 +1028,16 @@ class MotionQueryServer(ThreadingHTTPServer):
                     max_length=self.translation_max_length,
                 )
             return self._translator
+
+    def semantic_retriever(self) -> SemanticRetriever | None:
+        if not self.semantic_model:
+            return None
+        with self._semantic_lock:
+            if self._semantic_retriever is None:
+                self._semantic_retriever = SemanticRetriever(
+                    self.semantic_index, self.semantic_model, self.semantic_device, self.semantic_max_length
+                )
+            return self._semantic_retriever if self._semantic_retriever.available else None
 
 
 class MotionQueryRequestHandler(BaseHTTPRequestHandler):
@@ -820,6 +1064,9 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         if path == "/ui":
             self._send_ui_index()
             return
+        if path in {"/ui/action-taxonomy", "/动作资产分类树.html"}:
+            self._send_action_taxonomy_page()
+            return
         if path.startswith("/ui/static/"):
             relative_path = unquote(path[len("/ui/static/") :])
             self._send_static_file(relative_path)
@@ -828,8 +1075,22 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"status": "ok", "data": self.server.motion_index.get_summary()})
             return
         if path == f"{API_PREFIX}/taxonomy":
+            started = time.perf_counter()
             aggregate, direct = self.server.motion_index.taxonomy_counts()
-            self._send_json(HTTPStatus.OK, {"status": "ok", "data": motion_taxonomy.taxonomy_payload(counts=aggregate, direct_counts=direct)})
+            compact = first_query_value(query, "view") == "compact"
+            payload = motion_taxonomy.taxonomy_payload(
+                counts=aggregate,
+                direct_counts=direct,
+                include_nodes=not compact,
+            )
+            self._send_json(
+                HTTPStatus.OK,
+                {"status": "ok", "data": payload},
+                cache_control="public, max-age=300, stale-while-revalidate=3600" if compact else "no-cache",
+                use_etag=True,
+                compact=compact,
+                server_timing={"taxonomy": (time.perf_counter() - started) * 1000},
+            )
             return
         if path == f"{API_PREFIX}/library":
             self._handle_library(query)
@@ -908,54 +1169,133 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
 
 
     def _handle_library(self, query: dict[str, list[str]]) -> None:
+        request_started = time.perf_counter()
+        timings: dict[str, float] = {}
         limit = clamp_int(first_query_value(query, "limit"), 9, minimum=1, maximum=MAX_PAGE_SIZE)
         offset = clamp_int(first_query_value(query, "offset"), 0, minimum=0)
         dataset_filter = first_query_value(query, "dataset")
         sort_key = first_query_value(query, "sort") or "relevance"
         search_query = first_query_value(query, "q") or first_query_value(query, "search")
+        retrieval_mode = (first_query_value(query, "retrieval_mode") or "lexical").lower()
+        if retrieval_mode not in {"lexical", "semantic", "hybrid"}:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "retrieval_mode must be lexical, semantic, or hybrid")
+            return
         node_filter = first_query_value(query, "node_id") or first_query_value(query, "taxonomy_node")
         include_descendants = parse_bool(first_query_value(query, "include_descendants"), True)
-        allowed_nodes: set[str] | None = None
-        if node_filter:
-            if node_filter not in motion_taxonomy.NODES_BY_ID:
-                self._send_error_json(HTTPStatus.BAD_REQUEST, f"Unknown taxonomy node: {node_filter}")
-                return
-            allowed_nodes = motion_taxonomy.node_descendants(node_filter) if include_descendants else {node_filter}
+        compact = first_query_value(query, "view") == "compact"
+        if node_filter and node_filter not in motion_taxonomy.NODES_BY_ID:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, f"Unknown taxonomy node: {node_filter}")
+            return
         axis_filters = {axis: first_query_value(query, axis) for axis in motion_taxonomy.AXIS_ORDER}
 
-        try:
-            if search_query:
-                scored = self.server.motion_index.search_entries(search_query, top_k=None)
-                scored_entries = [(entry, score) for score, entry in scored]
-                max_score = scored[0][0] if scored else None
-            elif node_filter:
-                candidate_ids = self.server.motion_index.node_entry_ids[node_filter] if include_descendants else self.server.motion_index.node_direct_entry_ids[node_filter]
-                scored_entries = [(self.server.motion_index.entries_by_id[object_id], None) for object_id in candidate_ids]
-                max_score = None
+        use_default_snapshot = (
+            not search_query
+            and not dataset_filter
+            and not node_filter
+            and not any(axis_filters.values())
+            and sort_key in {"relevance", "motion_id"}
+        )
+
+        if use_default_snapshot:
+            total_count = len(self.server.motion_index._sorted_entries)
+            entries = self.server.motion_index._sorted_entries[offset : offset + limit]
+            page = [
+                (entry, None, self.server.motion_index.library_classifications[entry.object_id])
+                for entry in entries
+            ]
+            facets = self.server.motion_index.default_library_facets
+            hierarchy = None if compact else self.server.motion_index.default_library_hierarchy
+            max_score = None
+        else:
+            filter_started = time.perf_counter()
+            try:
+                if search_query:
+                    semantic = self.server.semantic_retriever() if retrieval_mode in {"semantic", "hybrid"} else None
+                    if retrieval_mode in {"semantic", "hybrid"} and semantic is not None:
+                        hybrid = self.server.motion_index.search_hybrid(search_query, semantic, top_k=None)
+                        scored = [(score, entry) for score, entry, _detail in hybrid]
+                    else:
+                        scored = self.server.motion_index.search_entries(search_query, top_k=None)
+                        if retrieval_mode in {"semantic", "hybrid"}:
+                            retrieval_mode = "lexical"
+                    scored_entries = [(entry, score) for score, entry in scored]
+                    base_ids = {entry.object_id for entry, _score in scored_entries}
+                    max_score = scored[0][0] if scored else None
+                else:
+                    scored_entries = [] if compact else [(entry, None) for entry in self.server.motion_index._sorted_entries]
+                    base_ids = self.server.motion_index.all_entry_ids
+                    max_score = None
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            if compact:
+                index = self.server.motion_index
+                base_mask = index.entries_to_mask([entry for entry, _score in scored_entries]) if search_query else index.all_entry_mask
+                result_mask = self._filter_library_mask(
+                    base_mask,
+                    dataset_filter=dataset_filter,
+                    node_filter=node_filter,
+                    include_descendants=include_descendants,
+                    axis_filters=axis_filters,
+                )
+                if search_query:
+                    rows = [
+                        (entry, score, index.library_classifications[entry.object_id])
+                        for entry, score in scored_entries
+                        if index.mask_contains(result_mask, entry)
+                    ]
+                else:
+                    rows = [
+                        (entry, None, index.library_classifications[entry.object_id])
+                        for entry in index.entries_from_mask(result_mask)
+                    ]
+                timings["filter"] = (time.perf_counter() - filter_started) * 1000
+                facet_started = time.perf_counter()
+                facet_key = None if search_query else (
+                    dataset_filter or "", node_filter or "", include_descendants,
+                    tuple((axis, axis_filters.get(axis) or "") for axis in motion_taxonomy.AXIS_ORDER),
+                )
+                facets = index.get_cached_facets(facet_key) if facet_key is not None else None
+                if facets is None:
+                    facets = self._build_self_excluding_library_facets_bitmap(
+                        base_mask,
+                        dataset_filter=dataset_filter,
+                        node_filter=node_filter,
+                        include_descendants=include_descendants,
+                        axis_filters=axis_filters,
+                    )
+                    if facet_key is not None:
+                        index.cache_facets(facet_key, facets)
+                timings["facets"] = (time.perf_counter() - facet_started) * 1000
             else:
-                scored_entries = [(entry, None) for entry in self.server.motion_index.entries]
-                max_score = None
-        except ValueError as exc:
-            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-            return
-
-        rows: list[tuple[MotionEntry, float | None, dict[str, Any]]] = []
-        for entry, score in scored_entries:
-            if dataset_filter and entry.dataset != dataset_filter.strip().lower():
-                continue
-            classification = motion_taxonomy.classify_motion(entry)
-            taxonomy = classification["taxonomy"]
-            assigned_nodes = {str(node["id"]) for node in classification.get("action_nodes") or ()}
-            if allowed_nodes is not None and not assigned_nodes.intersection(allowed_nodes):
-                continue
-            if any(value and taxonomy.get(axis) != value for axis, value in axis_filters.items()):
-                continue
-            rows.append((entry, score, classification))
-
-        facets = self._build_library_facets(rows)
-        total_count = len(rows)
-        rows = self._sort_library_rows(rows, sort_key)
-        page = rows[offset : offset + limit]
+                result_ids = self._filter_library_ids(
+                    base_ids,
+                    dataset_filter=dataset_filter,
+                    node_filter=node_filter,
+                    include_descendants=include_descendants,
+                    axis_filters=axis_filters,
+                )
+                rows = [
+                    (entry, score, self.server.motion_index.library_classifications[entry.object_id])
+                    for entry, score in scored_entries
+                    if entry.object_id in result_ids
+                ]
+                facets = self._build_self_excluding_library_facets(
+                    base_ids,
+                    dataset_filter=dataset_filter,
+                    node_filter=node_filter,
+                    include_descendants=include_descendants,
+                    axis_filters=axis_filters,
+                )
+                timings["filter"] = (time.perf_counter() - filter_started) * 1000
+            total_count = len(rows)
+            rows = self._sort_library_rows(rows, sort_key)
+            page = rows[offset : offset + limit]
+            hierarchy = None if compact else motion_taxonomy.taxonomy_payload(
+                    counts=facets.get("action_node", {}),
+                    direct_counts=facets.get("action_node_direct", {}),
+                ).get("hierarchy", [])
+        serialize_started = time.perf_counter()
         data = [
             self._serialize_entry(
                 entry,
@@ -963,66 +1303,219 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 score=score,
                 max_score=max_score,
                 classification=classification,
+                compact=compact,
             )
             for entry, score, classification in page
         ]
+        timings["serialize"] = (time.perf_counter() - serialize_started) * 1000
+        response: dict[str, Any] = {
+            "status": "ok",
+            "items": data,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "facets": self._sparse_facets(facets) if compact else facets,
+            "taxonomy_version": motion_taxonomy.TAXONOMY_VERSION,
+            "filters": {
+                "q": search_query,
+                "retrieval_mode": retrieval_mode,
+                "dataset": dataset_filter,
+                "node_id": node_filter,
+                "include_descendants": include_descendants,
+                **{axis: value for axis, value in axis_filters.items() if value},
+            },
+            "sort": sort_key,
+            "retrieval_mode": retrieval_mode,
+        }
+        if compact:
+            response["global_total"] = len(self.server.motion_index.entries)
+        else:
+            response["data"] = data
+            response["hierarchy"] = hierarchy
+            response["summary"] = self.server.motion_index.get_summary()
+        timings["total"] = (time.perf_counter() - request_started) * 1000
         self._send_json(
             HTTPStatus.OK,
-            {
-                "status": "ok",
-                "items": data,
-                "data": data,
-                "total": total_count,
-                "limit": limit,
-                "offset": offset,
-                "facets": facets,
-                "hierarchy": motion_taxonomy.taxonomy_payload(
-                    counts=facets.get("action_node", {}),
-                    direct_counts=facets.get("action_node_direct", {}),
-                ).get("hierarchy", []),
-                "taxonomy_version": motion_taxonomy.taxonomy_payload().get("version"),
-                "filters": {
-                    "q": search_query,
-                    "dataset": dataset_filter,
-                    "node_id": node_filter,
-                    "include_descendants": include_descendants,
-                    **{axis: value for axis, value in axis_filters.items() if value},
-                },
-                "sort": sort_key,
-                "summary": self.server.motion_index.get_summary(),
-            },
+            response,
+            cache_control=("private, max-age=60, stale-while-revalidate=300" if compact else "no-cache" if use_default_snapshot else None),
+            use_etag=compact or use_default_snapshot,
+            compact=compact,
+            server_timing=timings,
         )
 
-    def _build_library_facets(self, rows: list[tuple[MotionEntry, float | None, dict[str, Any]]]) -> dict[str, dict[str, int]]:
-        facets: dict[str, Counter[str]] = {axis: Counter() for axis in motion_taxonomy.AXIS_ORDER}
-        facets["dataset"] = Counter()
-        facets["action_node"] = Counter()
-        facets["action_node_direct"] = Counter()
-        for entry, _score, classification in rows:
-            facets["dataset"][entry.dataset] += 1
-            for axis, value in classification["taxonomy"].items():
-                facets[axis][value] += 1
-            direct_nodes = {str(node["id"]) for node in classification.get("action_nodes") or ()}
-            aggregate_nodes: set[str] = set()
-            for node_id in direct_nodes:
-                facets["action_node_direct"][node_id] += 1
-                current_id: str | None = node_id
-                while current_id:
-                    aggregate_nodes.add(current_id)
-                    current_id = motion_taxonomy.NODES_BY_ID[current_id].get("parent_id")
-            for node_id in aggregate_nodes:
-                facets["action_node"][node_id] += 1
-        return {axis: dict(counter) for axis, counter in facets.items()}
+    def _sparse_facets(self, facets: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
+        visible = set(self.server.motion_index.visible_node_ids)
+        return {
+            axis: {
+                key: count for key, count in values.items()
+                if count and (axis not in {"action_node", "action_node_direct"} or key in visible)
+            }
+            for axis, values in facets.items()
+        }
 
-    @staticmethod
+    def _filter_library_ids(
+        self,
+        base_ids: set[str],
+        *,
+        dataset_filter: str | None,
+        node_filter: str | None,
+        include_descendants: bool,
+        axis_filters: dict[str, str | None],
+        excluded_facet: str | None = None,
+    ) -> set[str]:
+        result = set(base_ids)
+        index = self.server.motion_index
+        if dataset_filter and excluded_facet != "dataset":
+            result.intersection_update(index.dataset_entry_ids.get(dataset_filter.strip().lower(), set()))
+        if node_filter and excluded_facet != "action_node":
+            node_ids = index.node_entry_ids if include_descendants else index.node_direct_entry_ids
+            result.intersection_update(node_ids.get(node_filter, set()))
+        for axis, value in axis_filters.items():
+            if value and excluded_facet != axis:
+                result.intersection_update(index.axis_entry_ids[axis].get(value, set()))
+        return result
+
+    def _filter_library_mask(
+        self,
+        base_mask: int,
+        *,
+        dataset_filter: str | None,
+        node_filter: str | None,
+        include_descendants: bool,
+        axis_filters: dict[str, str | None],
+        excluded_facet: str | None = None,
+    ) -> int:
+        result = base_mask
+        index = self.server.motion_index
+        if dataset_filter and excluded_facet != "dataset":
+            result &= index.dataset_entry_masks.get(dataset_filter.strip().lower(), 0)
+        if node_filter and excluded_facet != "action_node":
+            node_masks = index.node_entry_masks if include_descendants else index.node_direct_entry_masks
+            result &= node_masks.get(node_filter, 0)
+        for axis, value in axis_filters.items():
+            if value and excluded_facet != axis:
+                result &= index.axis_entry_masks[axis].get(value, 0)
+        return result
+
+    def _build_self_excluding_library_facets_bitmap(
+        self,
+        base_mask: int,
+        *,
+        dataset_filter: str | None,
+        node_filter: str | None,
+        include_descendants: bool,
+        axis_filters: dict[str, str | None],
+    ) -> dict[str, dict[str, int]]:
+        index = self.server.motion_index
+        dataset_scope = self._filter_library_mask(
+            base_mask,
+            dataset_filter=dataset_filter,
+            node_filter=node_filter,
+            include_descendants=include_descendants,
+            axis_filters=axis_filters,
+            excluded_facet="dataset",
+        )
+        facets: dict[str, dict[str, int]] = {
+            "dataset": {
+                dataset: (dataset_scope & mask).bit_count()
+                for dataset, mask in index.dataset_entry_masks.items()
+            }
+        }
+        for axis in motion_taxonomy.AXIS_ORDER:
+            axis_scope = self._filter_library_mask(
+                base_mask,
+                dataset_filter=dataset_filter,
+                node_filter=node_filter,
+                include_descendants=include_descendants,
+                axis_filters=axis_filters,
+                excluded_facet=axis,
+            )
+            facets[axis] = {
+                value: (axis_scope & mask).bit_count()
+                for value, mask in index.axis_entry_masks[axis].items()
+            }
+        node_scope = self._filter_library_mask(
+            base_mask,
+            dataset_filter=dataset_filter,
+            node_filter=node_filter,
+            include_descendants=include_descendants,
+            axis_filters=axis_filters,
+            excluded_facet="action_node",
+        )
+        facets["action_node"] = {
+            node_id: (node_scope & index.node_entry_masks.get(node_id, 0)).bit_count()
+            for node_id in index.visible_node_ids
+        }
+        facets["action_node_direct"] = {
+            node_id: (node_scope & index.node_direct_entry_masks.get(node_id, 0)).bit_count()
+            for node_id in index.visible_node_ids
+        }
+        return facets
+
+    def _build_self_excluding_library_facets(
+        self,
+        base_ids: set[str],
+        *,
+        dataset_filter: str | None,
+        node_filter: str | None,
+        include_descendants: bool,
+        axis_filters: dict[str, str | None],
+    ) -> dict[str, dict[str, int]]:
+        index = self.server.motion_index
+        dataset_scope = self._filter_library_ids(
+            base_ids,
+            dataset_filter=dataset_filter,
+            node_filter=node_filter,
+            include_descendants=include_descendants,
+            axis_filters=axis_filters,
+            excluded_facet="dataset",
+        )
+        facets: dict[str, dict[str, int]] = {
+            "dataset": {
+                dataset: len(dataset_scope.intersection(entry_ids))
+                for dataset, entry_ids in index.dataset_entry_ids.items()
+            }
+        }
+        for axis in motion_taxonomy.AXIS_ORDER:
+            axis_scope = self._filter_library_ids(
+                base_ids,
+                dataset_filter=dataset_filter,
+                node_filter=node_filter,
+                include_descendants=include_descendants,
+                axis_filters=axis_filters,
+                excluded_facet=axis,
+            )
+            facets[axis] = {
+                value: len(axis_scope.intersection(entry_ids))
+                for value, entry_ids in index.axis_entry_ids[axis].items()
+            }
+        node_scope = self._filter_library_ids(
+            base_ids,
+            dataset_filter=dataset_filter,
+            node_filter=node_filter,
+            include_descendants=include_descendants,
+            axis_filters=axis_filters,
+            excluded_facet="action_node",
+        )
+        facets["action_node"] = {
+            node_id: len(node_scope.intersection(entry_ids))
+            for node_id, entry_ids in index.node_entry_ids.items()
+        }
+        facets["action_node_direct"] = {
+            node_id: len(node_scope.intersection(entry_ids))
+            for node_id, entry_ids in index.node_direct_entry_ids.items()
+        }
+        return facets
+
     def _sort_library_rows(
+        self,
         rows: list[tuple[MotionEntry, float | None, dict[str, Any]]],
         sort_key: str,
     ) -> list[tuple[MotionEntry, float | None, dict[str, Any]]]:
         if sort_key == "motion_id":
             return sorted(rows, key=lambda item: (item[0].dataset, item[0].motion_id))
         if sort_key == "frame_count_desc":
-            return sorted(rows, key=lambda item: (-(item[0].frame_count or 0), item[0].dataset, item[0].motion_id))
+            return sorted(rows, key=lambda item: (-(self.server.motion_index.frame_count_for(item[0]) or 0), item[0].dataset, item[0].motion_id))
         if any(score is not None for _entry, score, _classification in rows):
             return sorted(rows, key=lambda item: (-(item[1] or 0.0), item[0].dataset, item[0].motion_id))
         return sorted(rows, key=lambda item: (item[0].dataset, item[0].motion_id))
@@ -1054,23 +1547,63 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         include_model_info = parse_bool(payload.get("include_model_info"), True)
         randomness = clamp_float(payload.get("randomness", DEFAULT_SEARCH_RANDOMNESS), DEFAULT_SEARCH_RANDOMNESS, maximum=1.0)
         random_seed = payload.get("random_seed")
+        retrieval_mode = str(payload.get("retrieval_mode") or "lexical").lower()
+        if retrieval_mode not in {"lexical", "semantic", "hybrid"}:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "retrieval_mode must be lexical, semantic, or hybrid")
+            return
 
         try:
-            candidates = self.server.motion_index.search_entries(search_text, top_k=candidate_k)
-        except ValueError as exc:
-            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-            return
+            explanations: dict[str, dict[str, Any]] = {}
+            semantic = self.server.semantic_retriever() if retrieval_mode in {"semantic", "hybrid"} else None
+            if retrieval_mode in {"semantic", "hybrid"} and semantic is None:
+                warnings.append("Semantic retrieval is unavailable; fell back to lexical retrieval.")
+                retrieval_mode = "lexical"
+            if retrieval_mode == "hybrid":
+                hybrid = self.server.motion_index.search_hybrid(
+                    search_text,
+                    semantic,
+                    top_k=candidate_k,
+                    candidate_k=candidate_k,
+                    semantic_query=text,
+                )
+                candidates = [(score, entry) for score, entry, detail in hybrid]
+                explanations = {entry.object_id: detail for _score, entry, detail in hybrid}
+            elif retrieval_mode == "semantic":
+                dense = semantic.search(text, top_k=candidate_k)
+                candidates = []
+                seen: set[str] = set()
+                for score, row in dense:
+                    entry = self.server.motion_index.get_entry(str(row.get("object_id") or ""))
+                    if entry is not None and entry.object_id not in seen:
+                        seen.add(entry.object_id)
+                        candidates.append((score, entry))
+                        explanations[entry.object_id] = {
+                            "semantic_score": score,
+                            "matched_caption": row.get("caption", ""),
+                            "lexical_score": 0.0,
+                        }
+            else:
+                candidates = self.server.motion_index.search_entries(search_text, top_k=candidate_k)
+        except (ValueError, RuntimeError) as exc:
+            if retrieval_mode in {"semantic", "hybrid"}:
+                warnings.append(f"Semantic retrieval failed; fell back to lexical retrieval: {exc}")
+                retrieval_mode = "lexical"
+                candidates = self.server.motion_index.search_entries(search_text, top_k=candidate_k)
+                explanations = {}
+            else:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
         max_score = candidates[0][0] if candidates else None
         results = self._rerank_results(candidates, top_k=top_k, randomness=randomness, random_seed=random_seed)
         data = [
-            self._serialize_entry(entry, include_model_info=include_model_info, score=score, max_score=max_score)
+            self._serialize_entry(entry, include_model_info=include_model_info, score=score, max_score=max_score, retrieval=explanations.get(entry.object_id))
             for score, entry in results
         ]
 
         common = {
             "query_mode": "text",
             "requested_encoder": payload.get("encoder"),
-            "selected_encoder": LOCAL_ENCODER_NAME,
+            "selected_encoder": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
             "top_k": top_k,
             "candidate_k": candidate_k,
             "candidate_count": len(candidates),
@@ -1081,6 +1614,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "warnings": warnings,
             "query_text": text,
             "search_text": search_text,
+            "retrieval_mode": retrieval_mode,
             "translation": translation_info,
             "data": data,
         }
@@ -1114,8 +1648,9 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                     "top_k": top_k,
                     "candidate_k": candidate_k,
                     "requested_encoder": payload.get("encoder"),
-                    "selected_encoder": LOCAL_ENCODER_NAME,
+                    "selected_encoder": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
                     "candidate_count": len(candidates),
+                    "retrieval_mode": retrieval_mode,
                     "randomness": randomness,
                     "random_seed": random_seed,
                 },
@@ -1287,11 +1822,42 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         score: float | None = None,
         max_score: float | None = None,
         classification: dict[str, Any] | None = None,
+        compact: bool = False,
+        retrieval: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         legacy_download_path = f"/models/{entry.object_id}"
         rest_download_path = f"{API_PREFIX}/models/{entry.object_id}"
-        preview_path = self._preview_path_for(entry)
-        preview_available = preview_path.is_file() or preview_path.with_suffix(".png").is_file()
+        classification = classification or motion_taxonomy.classify_motion(entry)
+        if compact:
+            preview_download_path = f"{API_PREFIX}/previews/{entry.object_id}.webp"
+            payload: dict[str, Any] = {
+                "object_id": entry.object_id,
+                "dataset": entry.dataset,
+                "motion_id": entry.motion_id,
+                "description": entry.description,
+                "captions": list(entry.captions),
+                "frame_count": entry.frame_count,
+                "preview": {
+                    "available": True,
+                    "download_path": preview_download_path,
+                    "rotation_degrees": 0.0,
+                },
+                **classification,
+            }
+            if score is not None:
+                payload["score"] = round(score, 6)
+                payload["pooled_score"] = round(score / max_score, 6) if max_score else 0.0
+            if include_model_info:
+                payload["model"] = {
+                    "rest_download_path": rest_download_path,
+                    "filename": f"{Path(entry.motion_id).name or entry.object_id}.glb",
+                    "available": True,
+                    "lazy": True,
+                }
+            return payload
+        preview_path = self._resolve_preview_path(entry)
+        preview_available = preview_path is not None
+        preview_is_canonical = bool(preview_path and preview_path.with_suffix(preview_path.suffix + ".canonical-v2").is_file())
         preview_download_path = f"{API_PREFIX}/previews/{entry.object_id}.webp"
         payload: dict[str, Any] = {
             "object_id": entry.object_id,
@@ -1299,13 +1865,14 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "motion_id": entry.motion_id,
             "description": entry.description,
             "captions": list(entry.captions),
-            "frame_count": entry.frame_count,
+            "frame_count": self.server.motion_index.frame_count_for(entry),
             "source_motion": str(entry.source_motion),
             "caption_file": str(entry.caption_file),
             "preview": {
                 "available": preview_available,
                 "download_path": preview_download_path,
                 "download_url": self._absolute_url(preview_download_path),
+                "rotation_degrees": 0.0 if preview_is_canonical else self.server.motion_index.preview_rotation_for(entry),
             },
             "animal": entry.dataset,
             "track_name": entry.motion_id,
@@ -1327,13 +1894,14 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 "thumbnail": None,
             },
         }
-        classification = classification or motion_taxonomy.classify_motion(entry)
         payload.update(classification)
         if score is not None:
             payload["score"] = round(score, 6)
             payload["pooled_score"] = round(score / max_score, 6) if max_score else 0.0
             payload["best_view_id"] = None
             payload["best_view_path"] = None
+        if retrieval:
+            payload["retrieval"] = retrieval
         if include_model_info:
             payload["model"] = {
                 "sha256": entry.object_id,
@@ -1349,6 +1917,13 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
     def _preview_path_for(self, entry: MotionEntry) -> Path:
         return DEFAULT_PREVIEW_ROOT / entry.dataset / f"{entry.motion_id}.webp"
 
+    def _resolve_preview_path(self, entry: MotionEntry) -> Path | None:
+        preview_path = self._preview_path_for(entry)
+        if is_usable_preview_file(preview_path):
+            return preview_path
+        legacy_path = preview_path.with_suffix(".png")
+        return legacy_path if is_usable_preview_file(legacy_path) else None
+
     def _handle_preview_download(self, preview_id: str) -> None:
         suffix = ".webp" if preview_id.endswith(".webp") else ".png" if preview_id.endswith(".png") else ""
         object_id = preview_id[: -len(suffix)] if suffix else preview_id
@@ -1356,21 +1931,28 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         if entry is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Unknown object_id: {object_id}")
             return
-        preview_path = self._preview_path_for(entry)
-        if not preview_path.is_file():
-            legacy_path = preview_path.with_suffix(".png")
-            if legacy_path.is_file():
-                preview_path = legacy_path
-        if not preview_path.is_file():
+        preview_path = self._resolve_preview_path(entry)
+        if preview_path is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Preview is not available: {object_id}")
             return
         data = preview_path.read_bytes()
+        etag = f'"{hashlib.sha256(data).hexdigest()}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self._send_cors_headers()
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", "image/webp" if preview_path.suffix == ".webp" else "image/png")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_response_body(data)
 
     def _handle_model_download(self, object_id: str) -> None:
         entry = self.server.motion_index.get_entry(object_id)
@@ -1454,6 +2036,11 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "index_path": summary["index_path"],
             "preview_root": summary["preview_root"],
             "lazy_conversion": True,
+            "semantic_retrieval": {
+                "configured": bool(self.server.semantic_model),
+                "index": str(self.server.semantic_index),
+                "model": self.server.semantic_model,
+            },
             "translation": {
                 "enabled": bool(self.server.translation_model or self.server.translation_url),
                 "url": self.server.translation_url,
@@ -1500,7 +2087,10 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_response_body(data)
+
+    def _send_action_taxonomy_page(self) -> None:
+        self._send_ui_index()
 
     def _send_static_file(self, relative_path: str) -> None:
         if not relative_path or relative_path.startswith("/"):
@@ -1521,12 +2111,23 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         elif target.suffix == ".css":
             content_type = "text/css; charset=utf-8"
         data = target.read_bytes()
+        etag = f'"{hashlib.sha256(data).hexdigest()}"'
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self._send_cors_headers()
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("ETag", etag)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("ETag", etag)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_response_body(data)
 
     def _read_json_payload(self) -> dict[str, Any]:
         length_header = self.headers.get("Content-Length")
@@ -1564,14 +2165,59 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         normalized = path if path.startswith("/") else f"/{path}"
         return f"{base_url}{normalized}"
 
-    def _send_json(self, status_code: HTTPStatus, payload: dict[str, Any]) -> None:
-        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    def _send_json(
+        self,
+        status_code: HTTPStatus,
+        payload: dict[str, Any],
+        *,
+        cache_control: str | None = None,
+        use_etag: bool = False,
+        compact: bool = False,
+        server_timing: dict[str, float] | None = None,
+    ) -> None:
+        data = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":") if compact else None,
+            indent=None if compact else 2,
+        ).encode("utf-8")
+        content_encoding = None
+        if len(data) >= 1024 and "gzip" in self.headers.get("Accept-Encoding", "").lower():
+            data = gzip.compress(data, compresslevel=5)
+            content_encoding = "gzip"
+        etag = f'"{hashlib.sha256(data).hexdigest()}"' if use_etag else None
+        if etag and self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self._send_cors_headers()
+            if cache_control:
+                self.send_header("Cache-Control", cache_control)
+            self.send_header("ETag", etag)
+            self.send_header("Vary", "Accept-Encoding")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         self.send_response(status_code)
         self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
+        if etag:
+            self.send_header("ETag", etag)
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
+        self.send_header("Vary", "Accept-Encoding")
+        if server_timing:
+            timing_value = ", ".join(f"{name};dur={duration:.2f}" for name, duration in server_timing.items())
+            self.send_header("Server-Timing", timing_value)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        self._write_response_body(data)
+
+    def _write_response_body(self, data: bytes) -> None:
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1628,6 +2274,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TRANSLATION_TIMEOUT_SECONDS,
         help=f"Translation request timeout in seconds. Default: {DEFAULT_TRANSLATION_TIMEOUT_SECONDS}.",
     )
+    parser.add_argument("--semantic-model", default=None, help="Local Hugging Face model directory for dense retrieval.")
+    parser.add_argument("--semantic-index", default=str(SCRIPT_DIR / "dataset" / "semantic_index"), help="Dense caption index directory.")
+    parser.add_argument("--semantic-device", default="auto", help="Dense retrieval device: auto, cpu, cuda, or cuda:N.")
+    parser.add_argument("--semantic-max-length", type=int, default=256)
     return parser
 
 
@@ -1657,6 +2307,10 @@ def main() -> None:
         translation_model=args.translation_model,
         translation_device=args.translation_device,
         translation_max_length=args.translation_max_length,
+        semantic_model=args.semantic_model,
+        semantic_index=Path(args.semantic_index),
+        semantic_device=args.semantic_device,
+        semantic_max_length=args.semantic_max_length,
     )
     example_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     print(

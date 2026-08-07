@@ -1,3 +1,0 @@
-# No third-party dependencies are required for search.
-# Lazy GLB download requires the converter dependencies used by multimotion,
-# including smplx and numpy in the active Python environment.

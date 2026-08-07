@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+import numpy as np
+
 
 MODULE_DIR = Path(__file__).resolve().parent
 TAXONOMY_DIR = MODULE_DIR / "taxonomy"
@@ -66,6 +68,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 _CATALOG = _load_json(CATALOG_PATH)
 _SOURCES = _load_json(SOURCES_PATH)
+TAXONOMY_VERSION = str(_CATALOG["taxonomy_version"])
 NODES: tuple[dict[str, Any], ...] = tuple(_CATALOG["nodes"])
 NODES_BY_ID = {node["id"]: node for node in NODES}
 CHILDREN: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
@@ -128,6 +131,20 @@ MATCH_PATTERNS: tuple[tuple[dict[str, Any], tuple[tuple[str, ...], ...]], ...] =
     (node, _aliases_for_node(node))
     for node in NODES
     if node.get("kind") not in {"domain", "category"} or node.get("aliases_en")
+)
+def _compact_text(value: str) -> str:
+    """Normalize CJK aliases without removing the CJK characters themselves."""
+    return re.sub(r"[\s\W_]+", "", str(value or "").lower(), flags=re.UNICODE)
+
+
+TEXT_MATCH_PATTERNS: tuple[tuple[dict[str, Any], tuple[str, ...]], ...] = tuple(
+    (node, tuple(sorted({
+        _compact_text(alias)
+        for alias in [node.get("zh_cn", ""), *(node.get("aliases_zh") or ())]
+        if any("\u4e00" <= char <= "\u9fff" for char in str(alias)) and _compact_text(alias)
+    }, key=lambda value: (-len(value), value))))
+    for node in NODES
+    if node.get("asset_taxonomy") and node.get("kind") == "action"
 )
 PHRASE_INDEX: dict[str, list[tuple[dict[str, Any], tuple[str, ...]]]] = defaultdict(list)
 for _match_node, _phrases in MATCH_PATTERNS:
@@ -215,40 +232,55 @@ def _legacy_domain_for_tag(category: str, tag: str) -> str:
     }.get(category, "other")
 
 
-def taxonomy_payload(*, counts: dict[str, int] | None = None, direct_counts: dict[str, int] | None = None) -> dict[str, Any]:
+def taxonomy_payload(
+    *,
+    counts: dict[str, int] | None = None,
+    direct_counts: dict[str, int] | None = None,
+    include_nodes: bool = True,
+) -> dict[str, Any]:
     counts = counts or {}
     direct_counts = direct_counts or {}
     nodes = []
-    for node in NODES:
-        item = {key: value for key, value in node.items() if key not in {"aliases_en", "aliases_zh", "priority"}}
-        item["depth"] = _node_depth(node["id"])
-        item["label"] = node["zh_cn"]
-        item["count"] = counts.get(node["id"], 0)
-        item["direct_count"] = direct_counts.get(node["id"], 0)
-        nodes.append(item)
+    if include_nodes:
+        for node in NODES:
+            item = {key: value for key, value in node.items() if key not in {"aliases_en", "aliases_zh", "priority"}}
+            item["depth"] = _node_depth(node["id"])
+            item["label"] = node["zh_cn"]
+            item["count"] = counts.get(node["id"], 0)
+            item["direct_count"] = direct_counts.get(node["id"], 0)
+            nodes.append(item)
     hierarchy = []
     for root in CHILDREN[None]:
+        if root.get("legacy_only"):
+            continue
         hierarchy.append(_tree_node(root, counts, direct_counts))
     axes = []
     for axis in AXIS_ORDER:
         definition = AXES[axis]
         axes.append({"key": axis, "label": definition["label"], "values": [{"key": key, "label": label} for key, label in definition["values"].items()]})
-    return {
-        "version": _CATALOG["taxonomy_version"],
+    payload = {
+        "version": TAXONOMY_VERSION,
         "hierarchy": hierarchy,
-        "nodes": nodes,
         "sources": _SOURCES["sources"],
         "axes": axes,
+        "asset_taxonomy_counts": _CATALOG.get("asset_taxonomy_counts", {}),
     }
+    if include_nodes:
+        payload["nodes"] = nodes
+    return payload
 
 
 def _tree_node(node: dict[str, Any], counts: dict[str, int], direct_counts: dict[str, int]) -> dict[str, Any]:
-    return {
+    result = {
         "key": node["id"], "id": node["id"], "label": node["zh_cn"], "en": node["en"],
         "kind": node["kind"], "count": counts.get(node["id"], 0), "direct_count": direct_counts.get(node["id"], 0),
         "source_refs": node.get("source_refs", []),
-        "tags": [_tree_node(child, counts, direct_counts) for child in CHILDREN.get(node["id"], [])],
+        "tags": [_tree_node(child, counts, direct_counts) for child in CHILDREN.get(node["id"], []) if not child.get("legacy_only")],
     }
+    for field in ("summary", "focus"):
+        if node.get(field):
+            result[field] = node[field]
+    return result
 
 
 def _entry_text(entry: Any) -> str:
@@ -257,11 +289,40 @@ def _entry_text(entry: Any) -> str:
     return " ".join(parts)
 
 
+def _participants_for_dataset(dataset: str) -> str:
+    if dataset in {"interhuman", "interx"}:
+        return "pair"
+    if dataset == "motionxpp":
+        return "single"
+    return "group_or_unknown"
+
+
+def _normalize_cached_participants(classification: dict[str, Any], dataset: str) -> dict[str, Any]:
+    participants = _participants_for_dataset(dataset)
+    taxonomy = {**(classification.get("taxonomy") or {}), "participants": participants}
+    labels = {
+        **(classification.get("taxonomy_labels") or {}),
+        "participants": AUXILIARY_VALUES["participants"][participants],
+    }
+    matched_keywords = {
+        **(classification.get("matched_keywords") or {}),
+        "participants": [dataset] if participants in {"single", "pair"} and dataset else [],
+    }
+    return {
+        **classification,
+        "taxonomy": taxonomy,
+        "taxonomy_labels": labels,
+        "matched_keywords": matched_keywords,
+    }
+
+
 def classify_motion(entry: Any, *, use_cached: bool = True) -> dict[str, Any]:
+    dataset = str(getattr(entry, "dataset", "") or "").lower()
     cached = getattr(entry, "classification", None)
     if use_cached and isinstance(cached, dict) and cached.get("taxonomy_version") == _CATALOG["taxonomy_version"]:
-        return cached
+        return _normalize_cached_participants(cached, dataset)
     text = _entry_text(entry).lower()
+    compact_text = _compact_text(text)
     tokens = _tokenize(text)
     matched_by_node: dict[str, dict[str, Any]] = {}
     for index, token in enumerate(tokens):
@@ -275,6 +336,22 @@ def classify_motion(entry: Any, *, use_cached: bool = True) -> dict[str, Any]:
     for match in matched_by_node.values():
         match["matched"] = sorted(match["matched"])
         matches.append(match)
+
+    # The business taxonomy is authored in Chinese while most source captions
+    # are English. Keep a separate substring matcher for Chinese descriptions
+    # and aliases; token matching above remains the strict English matcher.
+    if any("\u4e00" <= char <= "\u9fff" for char in text):
+        for node, aliases in TEXT_MATCH_PATTERNS:
+            matched = [alias for alias in aliases if alias in compact_text]
+            if not matched:
+                continue
+            match = matched_by_node.setdefault(node["id"], {"node": node, "matched": set(), "length": 0})
+            match["matched"].update(matched)
+            match["length"] = max(match["length"], max(map(len, matched)))
+        matches = []
+        for match in matched_by_node.values():
+            match["matched"] = sorted(match["matched"])
+            matches.append(match)
 
     # Keep the most specific action for each branch. A posture can coexist with
     # a task, but parent/category hits are represented through the node path.
@@ -290,8 +367,7 @@ def classify_motion(entry: Any, *, use_cached: bool = True) -> dict[str, Any]:
     legacy_category, legacy_tag = _legacy_for_node(primary_id)
     legacy_domain = _legacy_domain_for_tag(legacy_category, legacy_tag)
 
-    dataset = str(getattr(entry, "dataset", "") or "").lower()
-    participants = "pair" if dataset in {"interhuman", "interx"} else "group_or_unknown"
+    participants = _participants_for_dataset(dataset)
     indoor = sorted(token for token in INDOOR_KEYWORDS if token in tokens)
     outdoor = sorted(token for token in OUTDOOR_KEYWORDS if token in tokens)
     if indoor and not outdoor:
@@ -316,9 +392,204 @@ def classify_motion(entry: Any, *, use_cached: bool = True) -> dict[str, Any]:
     return {
         "taxonomy_version": _CATALOG["taxonomy_version"], "taxonomy": taxonomy, "taxonomy_labels": labels,
         "primary_action_node_id": primary_id, "action_nodes": action_nodes,
-        "matched_keywords": {"action_category": [legacy_category] if primary_id else [], "action_tag": primary["matched"] if primary else [], "participants": [dataset] if participants == "pair" and dataset else [], "space": space_matches},
+        "matched_keywords": {"action_category": [legacy_category] if primary_id else [], "action_tag": primary["matched"] if primary else [], "participants": [dataset] if participants in {"single", "pair"} and dataset else [], "space": space_matches},
         "classification_confidence": confidence,
     }
+
+
+def apply_semantic_nodes(
+    classification: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    model_name: str,
+    status: str,
+) -> dict[str, Any]:
+    """Attach accepted semantic action nodes while preserving legacy axes."""
+    accepted = [
+        item for item in candidates
+        if item.get("node_id") in NODES_BY_ID
+        and str(item.get("node_id")).startswith("asset_tag_")
+    ][:1]
+    if not accepted:
+        return classification
+    primary_id = str(accepted[0]["node_id"])
+    category, tag = _legacy_for_node(primary_id)
+    domain = _legacy_domain_for_tag(category, tag)
+    taxonomy = {
+        **(classification.get("taxonomy") or {}),
+        "action_category": category,
+        "action_tag": tag,
+        "activity_domain": domain,
+    }
+    labels = {
+        **(classification.get("taxonomy_labels") or {}),
+        "action_category": CATEGORY_VALUES[category],
+        "action_tag": TAG_VALUES[tag],
+        "activity_domain": AXES["activity_domain"]["values"][domain],
+    }
+    action_nodes = []
+    for index, item in enumerate(accepted):
+        node = NODES_BY_ID[str(item["node_id"])]
+        action_nodes.append(
+            {
+                "id": node["id"],
+                "label": node["zh_cn"],
+                "en": node["en"],
+                "kind": node["kind"],
+                "path": [_node_label(value) for value in reversed(_ancestors(node["id"]))],
+                "role": "primary" if index == 0 else "secondary",
+                "matched_phrases": [],
+                "source_refs": node.get("source_refs", []),
+            }
+        )
+    score = float(accepted[0]["score"])
+    runner_up = float(candidates[1]["score"]) if len(candidates) > 1 else 0.0
+    return {
+        **classification,
+        "taxonomy": taxonomy,
+        "taxonomy_labels": labels,
+        "primary_action_node_id": primary_id,
+        "action_nodes": action_nodes,
+        "classification_confidence": round(score, 3),
+        "classification_method": "semantic_leaf_v2",
+        "confidence_level": status,
+        "classification_model": {
+            "name": model_name,
+            "score": round(score, 6),
+            "margin": round(score - runner_up, 6),
+            "candidate_node_ids": [str(item["node_id"]) for item in candidates],
+            "matched_caption": str(accepted[0].get("matched_caption") or ""),
+            "status": status,
+        },
+    }
+
+
+class TaxonomyClassifier:
+    """Batch classifier backed by the generated taxonomy and caption embeddings."""
+
+    def __init__(self, model_dir: Path, semantic_index_dir: Path, device: str = "cuda:3") -> None:
+        self.model_dir = model_dir.expanduser().resolve()
+        self.semantic_index_dir = semantic_index_dir.expanduser().resolve()
+        self.device = device
+        self.manifest = json.loads((self.model_dir / "manifest.json").read_text(encoding="utf-8"))
+        with (self.model_dir / "labels.jsonl").open("r", encoding="utf-8") as handle:
+            self.labels = [json.loads(line) for line in handle if line.strip()]
+        self.label_embeddings = np.load(self.model_dir / "label_embeddings.npy", mmap_mode="r")
+        self.group_embeddings = np.load(self.model_dir / "group_embeddings.npy", mmap_mode="r")
+        self.major_embeddings = np.load(self.model_dir / "major_embeddings.npy", mmap_mode="r")
+        self.caption_embeddings = np.load(self.semantic_index_dir / "embeddings.npy", mmap_mode="r")
+        with (self.semantic_index_dir / "captions.jsonl").open("r", encoding="utf-8") as handle:
+            self.caption_rows = [json.loads(line) for line in handle if line.strip()]
+        self._validate_model()
+
+    def _validate_model(self) -> None:
+        if self.label_embeddings.shape != (len(self.labels), int(self.manifest["dimension"])):
+            raise ValueError("taxonomy label index shape does not match its manifest")
+        if len(self.caption_rows) != self.caption_embeddings.shape[0]:
+            raise ValueError("semantic caption rows do not match caption embeddings")
+        if self.caption_embeddings.shape[1] != self.label_embeddings.shape[1]:
+            raise ValueError("caption and taxonomy embedding dimensions differ")
+        if self.group_embeddings.shape != self.label_embeddings.shape:
+            raise ValueError("group and leaf taxonomy embeddings differ")
+        if self.major_embeddings.shape != self.label_embeddings.shape:
+            raise ValueError("major and leaf taxonomy embeddings differ")
+
+    def classify_all(
+        self,
+        *,
+        rule_nodes: dict[str, set[str]] | None = None,
+        top_k: int = 5,
+        batch_size: int = 512,
+    ) -> dict[str, list[dict[str, Any]]]:
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError("taxonomy classification requires torch") from exc
+        resolved_device = self.device
+        if resolved_device == "auto":
+            resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+        leaf_embeddings = torch.from_numpy(
+            np.asarray(self.label_embeddings, dtype=np.float32)
+        ).to(resolved_device)
+        group_embeddings = torch.from_numpy(
+            np.asarray(self.group_embeddings, dtype=np.float32)
+        ).to(resolved_device)
+        major_embeddings = torch.from_numpy(
+            np.asarray(self.major_embeddings, dtype=np.float32)
+        ).to(resolved_device)
+        weights = self.manifest.get("score_weights") or {"leaf": 0.7, "group": 0.2, "major": 0.1}
+        rule_bonus = float(self.manifest.get("rule_prior_bonus", 0.015))
+        label_positions = {str(row["node_id"]): index for index, row in enumerate(self.labels)}
+        rule_nodes = rule_nodes or {}
+        candidates: dict[str, dict[int, tuple[float, float, float, float, str, bool]]] = defaultdict(dict)
+        count = len(self.caption_rows)
+        with torch.inference_mode():
+            for start in range(0, count, max(batch_size, 1)):
+                stop = min(start + batch_size, count)
+                batch = np.asarray(self.caption_embeddings[start:stop], dtype=np.float32)
+                batch_tensor = torch.from_numpy(batch).to(resolved_device)
+                leaf_scores = batch_tensor @ leaf_embeddings.T
+                group_scores = batch_tensor @ group_embeddings.T
+                major_scores = batch_tensor @ major_embeddings.T
+                scores = (
+                    float(weights["leaf"]) * leaf_scores
+                    + float(weights["group"]) * group_scores
+                    + float(weights["major"]) * major_scores
+                )
+                for offset, row in enumerate(self.caption_rows[start:stop]):
+                    for node_id in rule_nodes.get(str(row["object_id"]), ()):
+                        position = label_positions.get(node_id)
+                        if position is not None:
+                            scores[offset, position] += rule_bonus
+                values, indices = torch.topk(scores, k=min(top_k, len(self.labels)), dim=1)
+                leaf_values = torch.gather(leaf_scores, 1, indices)
+                group_values = torch.gather(group_scores, 1, indices)
+                major_values = torch.gather(major_scores, 1, indices)
+                values_np = values.cpu().numpy()
+                indices_np = indices.cpu().numpy()
+                leaf_np = leaf_values.cpu().numpy()
+                group_np = group_values.cpu().numpy()
+                major_np = major_values.cpu().numpy()
+                for offset, row in enumerate(self.caption_rows[start:stop]):
+                    object_id = str(row["object_id"])
+                    caption = str(row.get("caption") or "")
+                    object_candidates = candidates[object_id]
+                    expected = rule_nodes.get(object_id, set())
+                    for score, leaf_score, group_score, major_score, label_index in zip(
+                        values_np[offset], leaf_np[offset], group_np[offset],
+                        major_np[offset], indices_np[offset]
+                    ):
+                        previous = object_candidates.get(int(label_index))
+                        if previous is None or float(score) > previous[0]:
+                            object_candidates[int(label_index)] = (
+                                float(score),
+                                float(leaf_score),
+                                float(group_score),
+                                float(major_score),
+                                caption,
+                                str(self.labels[int(label_index)]["node_id"]) in expected,
+                            )
+                print(f"classified captions {stop}/{count}", flush=True)
+
+        result: dict[str, list[dict[str, Any]]] = {}
+        for object_id, values in candidates.items():
+            ordered = sorted(values.items(), key=lambda item: (-item[1][0], item[0]))[:top_k]
+            result[object_id] = [
+                {
+                    "node_id": self.labels[label_index]["node_id"],
+                    "label": self.labels[label_index]["label"],
+                    "score": round(score, 6),
+                    "leaf_score": round(leaf_score, 6),
+                    "group_score": round(group_score, 6),
+                    "major_score": round(major_score, 6),
+                    "rule_prior_applied": rule_prior_applied,
+                    "matched_caption": caption,
+                }
+                for label_index, (
+                    score, leaf_score, group_score, major_score, caption, rule_prior_applied
+                ) in ordered
+            ]
+        return result
 
 
 def _node_label(node_id: str) -> str:

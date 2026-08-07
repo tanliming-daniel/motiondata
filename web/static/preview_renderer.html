@@ -14,22 +14,38 @@ root.style.height = `${height}px`;
 window.__PREVIEW_STATUS__ = 'loading';
 window.__PREVIEW_ERROR__ = '';
 
+function subjectFacingDirection(object) {
+  const nodes = [];
+  object.traverse((node) => nodes.push(node));
+  const left = nodes.find((node) => /leftshoulder$/i.test(node.name || ""));
+  const right = nodes.find((node) => /rightshoulder$/i.test(node.name || ""));
+  if (!left || !right) return new THREE.Vector3(0, 0, 1);
+  const shoulderAxis = right.getWorldPosition(new THREE.Vector3())
+    .sub(left.getWorldPosition(new THREE.Vector3()));
+  shoulderAxis.y = 0;
+  if (shoulderAxis.lengthSq() < 1e-6) return new THREE.Vector3(0, 0, 1);
+  shoulderAxis.normalize();
+  return new THREE.Vector3(0, 1, 0).cross(shoulderAxis).normalize();
+}
+
 function fitObjectCamera(object, camera, padding = 1.56, fixedFront = false) {
-  if (fixedFront) {
-    object.updateMatrixWorld(true);
-    object.traverse((child) => { if (child.isSkinnedMesh) child.skeleton.update(); });
-  }
-  const box = new THREE.Box3().setFromObject(object, fixedFront);
+  object.updateMatrixWorld(true);
+  object.traverse((child) => { if (child.isSkinnedMesh) child.skeleton.update(); });
+  const box = new THREE.Box3().setFromObject(object, true);
   if (fixedFront) {
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const verticalFov = THREE.MathUtils.degToRad(camera.fov);
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(camera.aspect, 0.01));
     const heightDistance = size.y / Math.max(2 * Math.tan(verticalFov / 2), 0.01);
-    const widthDistance = size.x / Math.max(2 * Math.tan(horizontalFov / 2), 0.01);
+    const horizontalSpan = Math.hypot(size.x, size.z);
+    const widthDistance = horizontalSpan / Math.max(2 * Math.tan(horizontalFov / 2), 0.01);
     const distance = Math.max(heightDistance, widthDistance, 1.0) * padding;
     const targetY = box.min.y + size.y * 0.5;
-    camera.position.set(center.x, targetY, box.max.z + distance);
+    const viewDirection = subjectFacingDirection(object)
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), THREE.MathUtils.degToRad(12));
+    camera.position.copy(center).addScaledVector(viewDirection, distance);
+    camera.position.y = targetY + size.y * 0.06;
     camera.lookAt(center.x, targetY, center.z);
     camera.near = Math.max(distance / 200, 0.01);
     camera.far = Math.max(distance * 8, 80);
