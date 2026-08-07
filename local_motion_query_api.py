@@ -5,6 +5,7 @@ import argparse
 import ast
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 import gzip
 import hashlib
 from http import HTTPStatus
@@ -72,6 +73,14 @@ DEFAULT_SEARCH_RANDOMNESS = 0.12
 DEFAULT_TRANSLATION_TIMEOUT_SECONDS = 8.0
 MODEL_CONTENT_TYPE = "model/gltf-binary"
 
+
+@lru_cache(maxsize=32)
+def static_file_payload(path: str, mtime_ns: int, compressed: bool) -> tuple[bytes, str]:
+    raw = Path(path).read_bytes()
+    data = gzip.compress(raw, compresslevel=5) if compressed else raw
+    etag = hashlib.sha256(data).hexdigest()
+    return data, f'"{etag}"'
+
 TOKEN_RE = re.compile(r"[A-Za-z0-9一-鿿]+")
 STOPWORDS = {
     "a",
@@ -81,6 +90,7 @@ STOPWORDS = {
     "as",
     "at",
     "be",
+    "both",
     "by",
     "for",
     "from",
@@ -89,13 +99,19 @@ STOPWORDS = {
     "him",
     "his",
     "in",
+    "individual",
     "is",
     "it",
     "its",
+    "people",
+    "person",
+    "quickly",
     "of",
     "on",
     "or",
     "she",
+    "slowly",
+    "someone",
     "the",
     "their",
     "them",
@@ -553,6 +569,8 @@ class MotionIndex:
         )
         self._facet_cache: OrderedDict[tuple[Any, ...], dict[str, dict[str, int]]] = OrderedDict()
         self._facet_cache_lock = threading.Lock()
+        self._hybrid_cache: OrderedDict[tuple[str, str, int], list[tuple[float, MotionEntry, dict[str, Any]]]] = OrderedDict()
+        self._hybrid_cache_lock = threading.Lock()
 
     def ids_to_mask(self, entry_ids: set[str]) -> int:
         mask = 0
@@ -762,11 +780,12 @@ class MotionIndex:
         if not query_tokens:
             raise ValueError("Query text does not contain searchable tokens.")
         query_counts = Counter(query_tokens)
-        candidate_ids = self._search_index.candidates(query_tokens)
+        candidate_limit = max(top_k * 8, 1000) if top_k is not None else None
+        candidate_ids = self._search_index.candidates(query_tokens, limit=candidate_limit)
         scored = [
             (score, entry)
-            for entry in self.entries
-            if entry.object_id in candidate_ids
+            for object_id in candidate_ids
+            if (entry := self.entries_by_id.get(object_id)) is not None
             if (score := self._score_entry(normalized_query, query_counts, entry)) > 0
         ]
         scored.sort(key=lambda item: (-item[0], item[1].dataset, item[1].motion_id))
@@ -782,6 +801,16 @@ class MotionIndex:
         candidate_k: int = 300,
         semantic_query: str | None = None,
     ) -> list[tuple[float, MotionEntry, dict[str, Any]]]:
+        cache_key = (
+            normalize_whitespace(query_text).casefold(),
+            normalize_whitespace(semantic_query or query_text).casefold(),
+            max(int(candidate_k), 1),
+        )
+        with self._hybrid_cache_lock:
+            cached = self._hybrid_cache.get(cache_key)
+            if cached is not None:
+                self._hybrid_cache.move_to_end(cache_key)
+                return cached[: max(top_k, 1)] if top_k is not None else cached
         lexical = self.search_entries(query_text, top_k=candidate_k)
         dense = semantic.search(semantic_query or query_text, top_k=candidate_k)
         lexical_rank = {entry.object_id: rank for rank, (_score, entry) in enumerate(lexical, 1)}
@@ -806,6 +835,11 @@ class MotionIndex:
             }
             rows.append((fused, entry, detail))
         rows.sort(key=lambda item: (-item[0], item[1].dataset, item[1].motion_id))
+        with self._hybrid_cache_lock:
+            self._hybrid_cache[cache_key] = rows
+            self._hybrid_cache.move_to_end(cache_key)
+            while len(self._hybrid_cache) > 128:
+                self._hybrid_cache.popitem(last=False)
         return rows[: max(top_k, 1)] if top_k is not None else rows
 
     def _score_entry(self, normalized_query: str, query_counts: Counter[str], entry: MotionEntry) -> float:
@@ -1083,6 +1117,10 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 direct_counts=direct,
                 include_nodes=not compact,
             )
+            payload["default_facets"] = {
+                axis: self.server.motion_index.default_library_facets.get(axis, {})
+                for axis in ("dataset", "participants")
+            }
             self._send_json(
                 HTTPStatus.OK,
                 {"status": "ok", "data": payload},
@@ -1183,6 +1221,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         node_filter = first_query_value(query, "node_id") or first_query_value(query, "taxonomy_node")
         include_descendants = parse_bool(first_query_value(query, "include_descendants"), True)
         compact = first_query_value(query, "view") == "compact"
+        include_facets = parse_bool(first_query_value(query, "include_facets"), True)
         if node_filter and node_filter not in motion_taxonomy.NODES_BY_ID:
             self._send_error_json(HTTPStatus.BAD_REQUEST, f"Unknown taxonomy node: {node_filter}")
             return
@@ -1203,7 +1242,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 (entry, None, self.server.motion_index.library_classifications[entry.object_id])
                 for entry in entries
             ]
-            facets = self.server.motion_index.default_library_facets
+            facets = self.server.motion_index.default_library_facets if include_facets else {}
             hierarchy = None if compact else self.server.motion_index.default_library_hierarchy
             max_score = None
         else:
@@ -1250,23 +1289,25 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                         for entry in index.entries_from_mask(result_mask)
                     ]
                 timings["filter"] = (time.perf_counter() - filter_started) * 1000
-                facet_started = time.perf_counter()
-                facet_key = None if search_query else (
-                    dataset_filter or "", node_filter or "", include_descendants,
-                    tuple((axis, axis_filters.get(axis) or "") for axis in motion_taxonomy.AXIS_ORDER),
-                )
-                facets = index.get_cached_facets(facet_key) if facet_key is not None else None
-                if facets is None:
-                    facets = self._build_self_excluding_library_facets_bitmap(
-                        base_mask,
-                        dataset_filter=dataset_filter,
-                        node_filter=node_filter,
-                        include_descendants=include_descendants,
-                        axis_filters=axis_filters,
+                facets = {}
+                if include_facets:
+                    facet_started = time.perf_counter()
+                    facet_key = None if search_query else (
+                        dataset_filter or "", node_filter or "", include_descendants,
+                        tuple((axis, axis_filters.get(axis) or "") for axis in motion_taxonomy.AXIS_ORDER),
                     )
-                    if facet_key is not None:
-                        index.cache_facets(facet_key, facets)
-                timings["facets"] = (time.perf_counter() - facet_started) * 1000
+                    facets = index.get_cached_facets(facet_key) if facet_key is not None else None
+                    if facets is None:
+                        facets = self._build_self_excluding_library_facets_bitmap(
+                            base_mask,
+                            dataset_filter=dataset_filter,
+                            node_filter=node_filter,
+                            include_descendants=include_descendants,
+                            axis_filters=axis_filters,
+                        )
+                        if facet_key is not None:
+                            index.cache_facets(facet_key, facets)
+                    timings["facets"] = (time.perf_counter() - facet_started) * 1000
             else:
                 result_ids = self._filter_library_ids(
                     base_ids,
@@ -1286,7 +1327,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                     node_filter=node_filter,
                     include_descendants=include_descendants,
                     axis_filters=axis_filters,
-                )
+                ) if include_facets else {}
                 timings["filter"] = (time.perf_counter() - filter_started) * 1000
             total_count = len(rows)
             rows = self._sort_library_rows(rows, sort_key)
@@ -1314,7 +1355,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "total": total_count,
             "limit": limit,
             "offset": offset,
-            "facets": self._sparse_facets(facets) if compact else facets,
+            "facets": self._sparse_facets(facets) if compact and include_facets else facets,
             "taxonomy_version": motion_taxonomy.TAXONOMY_VERSION,
             "filters": {
                 "q": search_query,
@@ -1836,7 +1877,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 "motion_id": entry.motion_id,
                 "description": entry.description,
                 "captions": list(entry.captions),
-                "frame_count": entry.frame_count,
+                "frame_count": self.server.motion_index.frame_count_for(entry),
                 "preview": {
                     "available": True,
                     "download_path": preview_download_path,
@@ -1940,7 +1981,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         if self.headers.get("If-None-Match") == etag:
             self.send_response(HTTPStatus.NOT_MODIFIED)
             self._send_cors_headers()
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.send_header("ETag", etag)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -1948,7 +1989,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self._send_cors_headers()
         self.send_header("Content-Type", "image/webp" if preview_path.suffix == ".webp" else "image/png")
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         self.send_header("ETag", etag)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -2110,13 +2151,15 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             content_type = "text/javascript; charset=utf-8"
         elif target.suffix == ".css":
             content_type = "text/css; charset=utf-8"
-        data = target.read_bytes()
-        etag = f'"{hashlib.sha256(data).hexdigest()}"'
+        accepts_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        compress = accepts_gzip and target.suffix in {".js", ".css", ".html"}
+        data, etag = static_file_payload(str(target), target.stat().st_mtime_ns, compress)
         if self.headers.get("If-None-Match") == etag:
             self.send_response(HTTPStatus.NOT_MODIFIED)
             self._send_cors_headers()
             self.send_header("Cache-Control", "public, max-age=3600")
             self.send_header("ETag", etag)
+            self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -2125,6 +2168,9 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "public, max-age=3600")
         self.send_header("ETag", etag)
+        if compress:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self._write_response_body(data)

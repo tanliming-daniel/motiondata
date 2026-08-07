@@ -1,11 +1,12 @@
-const state = { globalTotal: null, offset: 0, limit: 24, total: 0, taxonomy: [], taxonomyNodes: [], taxonomySources: [], taxonomyQuery: "", expandedNodes: new Set(), hierarchy: [], facets: {}, filters: {}, items: [], view: "library", assetTaxonomyQuery: "", taxonomyCounts: {} };
+const state = { globalTotal: null, offset: 0, limit: 24, total: 0, taxonomy: [], taxonomyNodes: [], taxonomySources: [], taxonomyQuery: "", expandedNodes: new Set(), hierarchy: [], facets: {}, filters: {}, items: [], view: "library", assetTaxonomyQuery: "", taxonomyCounts: {}, facetsLoaded: false };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 
 let THREE, GLTFLoader, viewerModulesPromise;
 let renderer, scene, camera, mixer, clock, animationFrame, currentObject, currentFixedFront = false;
 let currentBlobUrl, currentItem, viewerAbortController, viewerRequestId = 0, lastViewerTrigger;
-let libraryRequestId = 0, taxonomySearchTimer, taxonomyPrefetchTimer;
+let libraryRequestId = 0, libraryAbortController, taxonomySearchTimer, taxonomyPrefetchTimer;
+let taxonomyFiltersReady = false;
 const requestCache = new Map();
 const REQUEST_CACHE_LIMIT = 64;
 
@@ -35,6 +36,19 @@ function cachedJson(url, { ttl = 30000 } = {}) {
   });
   requestCache.set(url, { promise, expires: now + ttl });
   return promise;
+}
+
+async function fetchLibraryJson(url, signal) {
+  const now = Date.now();
+  const existing = requestCache.get(url);
+  if (existing?.promise) return existing.promise;
+  if (existing && existing.expires > now && existing.value) return existing.value;
+  const value = await fetchJson(url, { signal });
+  if (!signal.aborted) {
+    requestCache.set(url, { value, expires: Date.now() + 60000 });
+    while (requestCache.size > REQUEST_CACHE_LIMIT) requestCache.delete(requestCache.keys().next().value);
+  }
+  return value;
 }
 
 function chip(label, count, selected, attrs) {
@@ -90,6 +104,18 @@ function renderTaxonomyFilters() {
     state.offset = 0;
     loadLibrary();
   }));
+  renderTaxonomyDetail();
+  taxonomyFiltersReady = true;
+}
+
+function updateFilterSelection() {
+  document.querySelectorAll("#taxonomyFilters [data-node-id].selected").forEach((button) => button.classList.remove("selected"));
+  document.querySelectorAll("#taxonomyFilters [data-node-id]").forEach((button) => {
+    if (button.dataset.nodeId === (state.filters.node_id || "")) button.classList.add("selected");
+  });
+  document.querySelectorAll("#datasetFilters [data-dataset]").forEach((button) => {
+    button.classList.toggle("selected", button.dataset.dataset === (state.filters.dataset || ""));
+  });
   renderTaxonomyDetail();
 }
 
@@ -154,6 +180,15 @@ function flattenHierarchy(nodes, result = []) {
     flattenHierarchy(node.tags, result);
   });
   return result;
+}
+
+function hierarchyFacets(nodes, aggregate = {}, direct = {}) {
+  (nodes || []).forEach((node) => {
+    aggregate[node.id] = Number(node.count || 0);
+    direct[node.id] = Number(node.direct_count || 0);
+    hierarchyFacets(node.tags, aggregate, direct);
+  });
+  return { action_node: aggregate, action_node_direct: direct };
 }
 
 function applyFacetCounts(nodes, facets) {
@@ -347,8 +382,9 @@ function renderPager() {
   $("#pageText").textContent = `${current} / ${pages}`;
 }
 
-function libraryUrl() {
+function libraryUrl({ includeFacets = !state.facetsLoaded } = {}) {
   const params = new URLSearchParams({ view: "compact", limit: String(state.limit), offset: String(state.offset), sort: $("#sortSelect").value, retrieval_mode: "hybrid" });
+  if (!includeFacets) params.set("include_facets", "0");
   Object.entries(state.filters).forEach(([key, value]) => { if (value) params.set(key, value); });
   const search = $("#searchInput").value.trim();
   if (search) params.set("q", search);
@@ -362,12 +398,20 @@ function applyLibraryPayload(payload) {
   if (!Number.isInteger(globalTotal) || globalTotal < 1) throw new Error("接口返回了无效的总数据量");
   state.total = resultTotal;
   state.globalTotal = globalTotal;
-  state.facets = payload.facets || {};
-  applyFacetCounts(state.hierarchy, state.facets);
+  const receivedFacets = payload.facets && Object.keys(payload.facets).length > 0;
+  if (receivedFacets) {
+    state.facets = payload.facets;
+    state.facetsLoaded = true;
+    applyFacetCounts(state.hierarchy, state.facets);
+  }
   state.items = payload.items || [];
   renderCards(state.items);
-  renderDatasetFilters();
-  renderTaxonomyFilters();
+  if (receivedFacets || !taxonomyFiltersReady) {
+    renderDatasetFilters();
+    renderTaxonomyFilters();
+  } else {
+    updateFilterSelection();
+  }
   renderActiveFilters();
   renderPager();
   $("#resultTitle").textContent = `筛选结果 · ${state.total.toLocaleString()}`;
@@ -384,13 +428,16 @@ function setLibraryNotice(message) {
 async function loadLibrary() {
   const requestId = ++libraryRequestId;
   const url = libraryUrl();
+  libraryAbortController?.abort();
+  libraryAbortController = new AbortController();
   $("#resultGrid").setAttribute("aria-busy", "true");
   try {
-    const payload = await cachedJson(url);
+    const payload = await fetchLibraryJson(url, libraryAbortController.signal);
     if (requestId !== libraryRequestId) return false;
     applyLibraryPayload(payload);
     return true;
   } catch (error) {
+    if (error.name === "AbortError") return false;
     if (requestId !== libraryRequestId) return false;
     setLibraryNotice(`读取失败：${error.message || error}`);
     return false;
@@ -571,6 +618,8 @@ function compactLibraryUrlForNode(nodeId) {
     limit: String(state.limit),
     offset: "0",
     sort: $("#sortSelect").value,
+    retrieval_mode: "hybrid",
+    include_facets: "0",
     node_id: nodeId,
   });
   return `/api/v1/library?${params}`;
@@ -650,12 +699,17 @@ async function boot() {
     if (route.nodeId) state.filters.node_id = route.nodeId;
     syncFilterAccessibility();
     const taxonomyPromise = cachedJson("/api/v1/taxonomy?view=compact", { ttl: 300000 });
-    const libraryPromise = route.view === "library" ? cachedJson(libraryUrl()) : null;
+    const libraryPromise = route.view === "library" ? cachedJson(libraryUrl({ includeFacets: false })) : null;
     const taxonomy = await taxonomyPromise;
     state.taxonomy = taxonomy.data?.axes || [];
     state.taxonomySources = taxonomy.data?.sources || [];
     state.hierarchy = taxonomy.data?.hierarchy || [];
     state.taxonomyNodes = flattenHierarchy(state.hierarchy);
+    state.facets = {
+      ...(taxonomy.data?.default_facets || {}),
+      ...hierarchyFacets(state.hierarchy),
+    };
+    state.facetsLoaded = true;
     state.taxonomyCounts = taxonomy.data?.asset_taxonomy_counts || {};
     $("#taxonomyMajorCount").textContent = Number(state.taxonomyCounts.major || state.hierarchy.length).toLocaleString();
     $("#taxonomyGroupCount").textContent = Number(state.taxonomyCounts.group || 0).toLocaleString();
@@ -699,7 +753,13 @@ async function pageResults(direction) {
 }
 
 let searchTimer;
-$("#searchInput").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.offset = 0; loadLibrary(); }, 220); });
+$("#searchInput").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.offset = 0; loadLibrary(); }, 300); });
+$("#searchInput").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  clearTimeout(searchTimer);
+  state.offset = 0;
+  loadLibrary();
+});
 $("#sortSelect").addEventListener("change", () => { state.offset = 0; loadLibrary(); });
 $("#clearFilters").addEventListener("click", () => {
   state.filters = {};

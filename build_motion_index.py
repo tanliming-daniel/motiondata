@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 import struct
@@ -96,6 +97,25 @@ def read_npy_frame_count(path: Path) -> int | None:
         return None
 
 
+def read_interhuman_frame_count(path: Path) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            payload = pickle.load(handle)
+        count = int(payload.get("frames") or 0) if isinstance(payload, dict) else 0
+        return count or None
+    except (OSError, ValueError, TypeError, pickle.UnpicklingError):
+        return None
+
+
+def read_interx_frame_count(sequence_dir: Path) -> int | None:
+    try:
+        with np.load(sequence_dir / "P1.npz", allow_pickle=False) as payload:
+            shape = payload["root_orient"].shape
+        return int(shape[0]) if shape and int(shape[0]) > 0 else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def interhuman_sort_key(path: Path) -> tuple[int, int | str]:
     stem = path.stem
     if stem.isdigit():
@@ -130,6 +150,7 @@ def build_interhuman_records(root: Path, cache_root: Path) -> tuple[list[MotionI
                 description=captions[0],
                 object_id=object_id,
                 cache_glb=cache_root / "interhuman" / f"{motion_id}.glb",
+                frame_count=read_interhuman_frame_count(motion_path),
             )
         )
     return records, warnings
@@ -165,6 +186,7 @@ def build_interx_records(root: Path, cache_root: Path) -> tuple[list[MotionIndex
                 description=captions[0],
                 object_id=object_id,
                 cache_glb=cache_root / "interx" / f"{motion_id}.glb",
+                frame_count=read_interx_frame_count(sequence_dir),
             )
         )
     return records, warnings

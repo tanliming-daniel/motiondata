@@ -5,6 +5,9 @@ Multimotion Lazy Retrieval Bundle
 当前支持 InterHuman、InterX 和 Motion-X++。Motion-X++ 使用 `models/smplx/SMPLX_NEUTRAL.npz`，
 首次下载时按需生成带 55 关节骨架和 50 个表情 morph targets 的 GLB。
 
+动作库前端默认使用关键词与 BGE-M3 混合检索。分类目录、列表和缩略图均使用固定索引结果，
+重型模型只参与文本查询和按需转换，不参与普通标签跳转。
+
 默认使用方式按中文查询来理解。
 API 现在会优先对短中文关键词直接走 alias，对较长中文描述再在进程内翻成英文，不需要再单独起一个翻译 HTTP 服务。
 
@@ -70,6 +73,8 @@ python3 local_motion_query_api.py --host 0.0.0.0 --port 7091 \
 
 搜索接口支持 `lexical`、`semantic` 和 `hybrid` 三种 `retrieval_mode`。旧请求默认仍是关键词检索；动作库页面会使用 `hybrid`。模型或索引不可用时会自动回退到关键词检索，并在 `warnings` 中说明原因。
 
+GPU 模式会以 FP16 加载 BGE-M3，并把 FP16 caption 向量放到同一张 GPU 上计算；FTS 先截取宽松候选，再与向量结果融合。服务会缓存最近 128 个向量查询和最终混合候选，重复查询无需再次推理。模型在服务启动后首次语义查询时延迟加载，长期运行时只承担一次冷启动成本。
+
 默认使用的本地翻译模型路径是：
 
 ```text
@@ -117,6 +122,14 @@ http://127.0.0.1:7091/ui
 http://127.0.0.1:7091/ui/action-taxonomy
 ```
 
+前端交互使用以下轻量策略：
+
+- 分类树和固定计数只初始化一次，标签跳转不再重建整棵树。
+- 输入搜索有防抖，新的列表请求会取消仍在执行的旧请求。
+- 分类页悬停或聚焦三级标签时预取对应列表，点击后复用同一缓存。
+- Three.js、页面脚本和样式支持 gzip、ETag 与浏览器缓存。
+- WebP 缩略图使用长期 immutable 缓存；3D 模型仍只在播放或下载时生成。
+
 修改 `taxonomy/action_asset_source.json` 后，重新生成目录和资产分类：
 
 ```bash
@@ -124,7 +137,7 @@ python3 build_taxonomy_assignments.py --stage all \
   --classifier hybrid --device cuda:3 --translation-device cuda:0
 ```
 
-三级模型会为每条资产发布一个唯一的三级叶子标签，旧规则只作为轻量先验，不再锁定最终分类。低置信、规则冲突和分层抽样结果写入 `dataset/motion_taxonomy_review.jsonl`。
+三级模型会为每条资产发布一个唯一的三级叶子标签，旧规则只作为轻量先验，不再锁定最终分类。低置信、规则冲突和分层抽样结果写入 `dataset/motion_taxonomy_review.jsonl`。“待复核”只是第一候选得分或与第二候选差距较低的提示，不表示资产未分类，也不影响文本检索。
 
 ## 搜索
 
@@ -351,17 +364,17 @@ curl 'http://127.0.0.1:7091/api/v1/library?node_id=strength_squat&include_descen
 
 父节点默认包含所有子节点；传 `include_descendants=false` 可只匹配直接挂载到该节点的素材。旧的 `action_category`、`action_tag` 和 `activity_domain` 参数继续兼容。
 
-动作库响应中的 `summary.entry_count` 是固定的全库总量，`total` 是当前查询和筛选后的结果量。
-`facets` 使用排除自身筛选的计数方式：例如选中某个数据集后，`facets.dataset` 仍会列出其他数据集在其余条件下的可用数量。
+动作库响应中的 `summary.entry_count` 或精简响应中的 `global_total` 是固定的全库总量，`total` 是当前查询和筛选后的结果量。
+完整响应的 `facets` 使用排除自身筛选的计数方式；Web 前端从 taxonomy 接口读取固定全局计数，切换标签时数字不会随请求重新计算。
 
 Web 前端使用兼容的精简响应，外部客户端不受影响：
 
 ```text
 GET /api/v1/taxonomy?view=compact
-GET /api/v1/library?view=compact&node_id=<node_id>
+GET /api/v1/library?view=compact&include_facets=0&node_id=<node_id>
 ```
 
-精简模式会省略重复的平铺节点、`data`、`hierarchy` 和 `summary`，并支持 gzip、ETag 与短期缓存。
+精简模式会省略重复的平铺节点、`data`、`hierarchy` 和 `summary`，并支持 gzip、ETag 与短期缓存。`include_facets=0` 会跳过动态 facet 计算和传输，适合前端搜索、分页和标签跳转；未传该参数时保持原有 API 行为。
 
 如果你换了原始数据或 caption，重新生成索引：
 
@@ -369,6 +382,8 @@ GET /api/v1/library?view=compact&node_id=<node_id>
 cd /data5/cy/multimotion/server_bundle_lazy
 python3 build_motion_index.py
 ```
+
+索引会持久化三套数据集的帧数，列表请求不会再为补帧数逐条访问 NAS。全量重建会以当前 NAS 挂载内容为准，可能新增或移除资产；需要保持线上总数稳定时，应先输出到临时文件，对比 `object_id` 和数据集数量后再替换正式索引。
 
 只重建 Motion-X++ 索引可以使用：
 

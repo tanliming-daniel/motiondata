@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import re
 import sqlite3
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -65,12 +67,18 @@ class SearchIndex:
         )
         self.connection.commit()
 
-    def candidates(self, tokens: Iterable[str]) -> set[str]:
+    def candidates(self, tokens: Iterable[str], limit: int | None = None) -> set[str]:
         terms = [token.replace('"', '""') for token in tokens if token]
         if not terms:
             return set()
         match = " OR ".join(f'"{term}"' for term in terms)
-        rows = self.connection.execute("SELECT object_id FROM documents WHERE documents MATCH ?", (match,))
+        if limit is None:
+            rows = self.connection.execute("SELECT object_id FROM documents WHERE documents MATCH ?", (match,))
+        else:
+            rows = self.connection.execute(
+                "SELECT object_id FROM documents WHERE documents MATCH ? ORDER BY bm25(documents) LIMIT ?",
+                (match, max(int(limit), 1)),
+            )
         return {str(row[0]) for row in rows}
 
     def close(self) -> None:
@@ -97,7 +105,12 @@ class SemanticRetriever:
         self._model = None
         self._tokenizer = None
         self._torch = None
+        self._embedding_tensor = None
         self._load_lock = threading.Lock()
+        self._inference_lock = threading.Lock()
+        self._search_cache: OrderedDict[tuple[str, int], list[tuple[float, dict[str, Any]]]] = OrderedDict()
+        self._search_cache_lock = threading.Lock()
+        self._search_cache_size = 128
         self._load_index()
 
     @property
@@ -112,9 +125,7 @@ class SemanticRetriever:
             return
         try:
             self.manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.embeddings = np.asarray(
-                np.load(embedding_path, mmap_mode="r"), dtype=np.float32
-            )
+            self.embeddings = np.load(embedding_path, mmap_mode="r")
             with rows_path.open("r", encoding="utf-8") as handle:
                 self.rows = [json.loads(line) for line in handle if line.strip()]
             if self.embeddings.ndim != 2 or len(self.rows) != self.embeddings.shape[0]:
@@ -147,12 +158,27 @@ class SemanticRetriever:
             else:
                 resolved_device = device
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self._model = AutoModel.from_pretrained(self.model_name)
+            model_options = {"low_cpu_mem_usage": True}
+            if str(resolved_device).startswith("cuda"):
+                model_options["torch_dtype"] = torch.float16
+            self._model = AutoModel.from_pretrained(self.model_name, **model_options)
             self._model.to(resolved_device).eval()
             self._torch = torch
             self._device = resolved_device
+            if str(resolved_device).startswith("cuda"):
+                embedding_array = np.array(self.embeddings, copy=True)
+                self._embedding_tensor = torch.from_numpy(
+                    embedding_array
+                ).to(resolved_device)
+                del embedding_array
+            gc.collect()
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except (ImportError, OSError, AttributeError):
+                pass
 
-    def encode(self, texts: list[str]) -> np.ndarray:
+    def _encode_tensor(self, texts: list[str]):
         self._ensure_model()
         torch = self._torch
         encoded = self._tokenizer(
@@ -166,18 +192,56 @@ class SemanticRetriever:
         with torch.inference_mode():
             output = self._model(**encoded)
             pooled = output.last_hidden_state[:, 0]
-            pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
-        return pooled.detach().cpu().numpy().astype(np.float32, copy=False)
+            return torch.nn.functional.normalize(pooled, p=2, dim=1)
+
+    def encode(self, texts: list[str]) -> np.ndarray:
+        with self._inference_lock:
+            pooled = self._encode_tensor(texts)
+            return pooled.detach().cpu().numpy().astype(np.float32, copy=False)
 
     def search(self, query: str, top_k: int = 300) -> list[tuple[float, dict[str, Any]]]:
         if not self.available:
             raise RuntimeError("semantic index or model is unavailable")
-        clauses = split_query_clauses(query)
-        vectors = self.encode([query, *clauses[1:]]) if len(clauses) > 1 else self.encode([query])
-        scores = self.embeddings @ vectors[0]
-        if len(vectors) > 1:
-            scores = 0.6 * scores + 0.4 * np.max(self.embeddings @ vectors[1:], axis=1)
-        count = min(max(int(top_k), 1), len(scores))
-        indices = np.argpartition(-scores, count - 1)[:count]
-        indices = indices[np.argsort(-scores[indices], kind="stable")]
-        return [(float(scores[index]), self.rows[int(index)]) for index in indices]
+        normalized_query = " ".join(query.strip().split())
+        count = min(max(int(top_k), 1), len(self.rows))
+        cache_key = (normalized_query.casefold(), count)
+        with self._search_cache_lock:
+            cached = self._search_cache.get(cache_key)
+            if cached is not None:
+                self._search_cache.move_to_end(cache_key)
+                return cached
+
+        clauses = split_query_clauses(normalized_query)
+        texts = [normalized_query, *clauses[1:]] if len(clauses) > 1 else [normalized_query]
+        with self._inference_lock:
+            vectors = self._encode_tensor(texts)
+            if self._embedding_tensor is not None:
+                matrix = self._embedding_tensor
+                vectors = vectors.to(dtype=matrix.dtype)
+                scores_tensor = matrix @ vectors[0]
+                if len(vectors) > 1:
+                    clause_scores = matrix @ vectors[1:].T
+                    scores_tensor = 0.6 * scores_tensor + 0.4 * clause_scores.max(dim=1).values
+                values, indices_tensor = self._torch.topk(scores_tensor, k=count)
+                values_array = values.float().cpu().numpy()
+                indices = indices_tensor.cpu().numpy()
+                result = [
+                    (float(score), self.rows[int(index)])
+                    for score, index in zip(values_array, indices)
+                ]
+            else:
+                vectors_array = vectors.float().cpu().numpy()
+                embeddings = np.asarray(self.embeddings, dtype=np.float32)
+                scores = embeddings @ vectors_array[0]
+                if len(vectors_array) > 1:
+                    scores = 0.6 * scores + 0.4 * np.max(embeddings @ vectors_array[1:].T, axis=1)
+                indices = np.argpartition(-scores, count - 1)[:count]
+                indices = indices[np.argsort(-scores[indices], kind="stable")]
+                result = [(float(scores[index]), self.rows[int(index)]) for index in indices]
+
+        with self._search_cache_lock:
+            self._search_cache[cache_key] = result
+            self._search_cache.move_to_end(cache_key)
+            while len(self._search_cache) > self._search_cache_size:
+                self._search_cache.popitem(last=False)
+        return result
