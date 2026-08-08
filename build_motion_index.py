@@ -16,12 +16,18 @@ from typing import Iterable
 
 import numpy as np
 
-from search_index import SemanticRetriever
+from search_index import (
+    QWEN3_INDEX_SCHEMA_VERSION,
+    SemanticRetriever,
+    clean_motion_title,
+    clean_search_caption,
+    is_searchable_caption,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR / "dataset" / "motion_index.jsonl"
-DEFAULT_SEMANTIC_OUTPUT = SCRIPT_DIR / "dataset" / "semantic_index"
+DEFAULT_SEMANTIC_OUTPUT = SCRIPT_DIR / "dataset" / "semantic_index_qwen3_06b"
 DEFAULT_CACHE_ROOT = Path("cache") / "models"
 DEFAULT_INTERHUMAN_ROOT = Path("/mnt/nas/cy/humanmotion/interhuman")
 DEFAULT_INTERX_ROOT = Path("/mnt/nas/cy/humanmotion/interx")
@@ -235,17 +241,33 @@ def semantic_source_rows(index_path: Path) -> list[dict[str, str | int]]:
         for line in handle:
             item = json.loads(line)
             object_id = str(item.get("object_id") or "").strip()
+            dataset = str(item.get("dataset") or "")
+            motion_id = str(item.get("motion_id") or "")
+            source_title = clean_motion_title(dataset, motion_id)
+            if object_id and source_title:
+                rows.append(
+                    {
+                        "object_id": object_id,
+                        "caption": source_title,
+                        "caption_rank": -1,
+                        "dataset": dataset,
+                        "source_type": "source_title",
+                    }
+                )
             captions = item.get("captions") or [item.get("description") or ""]
             seen: set[str] = set()
             for rank, caption in enumerate(captions):
-                text = " ".join(str(caption).split())
+                text = clean_search_caption(str(caption))
+                if not is_searchable_caption(text):
+                    continue
                 if object_id and text and text not in seen:
                     rows.append(
                         {
                             "object_id": object_id,
                             "caption": text,
                             "caption_rank": rank,
-                            "dataset": str(item.get("dataset") or ""),
+                            "dataset": dataset,
+                            "source_type": "caption",
                         }
                     )
                     seen.add(text)
@@ -263,23 +285,40 @@ def build_semantic_index(
     rows = semantic_source_rows(index_path)
     if not rows:
         raise RuntimeError(f"motion index has no captions: {index_path}")
-    retriever = SemanticRetriever(output_path, model, device, max_length)
+    retriever = SemanticRetriever(output_path, model, device, max_length, load_index=False)
     vectors: list[np.ndarray] = []
     for start in range(0, len(rows), max(batch_size, 1)):
         batch = rows[start : start + max(batch_size, 1)]
-        vectors.append(retriever.encode([str(row["caption"]) for row in batch]))
+        vectors.append(retriever.encode_documents([str(row["caption"]) for row in batch]))
         print(f"encoded {min(start + len(batch), len(rows))}/{len(rows)}", flush=True)
 
     output = output_path.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     embeddings = np.concatenate(vectors).astype(np.float16)
+    model_config_path = Path(model).expanduser() / "config.json"
+    model_config_sha256 = (
+        hashlib.sha256(model_config_path.read_bytes()).hexdigest()
+        if model_config_path.is_file()
+        else None
+    )
+    model_revision = getattr(retriever._model.config, "_commit_hash", None)
     manifest: dict[str, object] = {
         "model": model,
+        "model_revision": model_revision,
+        "model_config_sha256": model_config_sha256,
+        "encoder_family": retriever.encoder_profile.family,
         "dimension": int(embeddings.shape[1]),
         "count": len(rows),
         "dtype": "float16",
         "normalized": True,
-        "pooling": "cls",
+        "pooling": retriever.encoder_profile.pooling,
+        "query_instruction": retriever.encoder_profile.query_instruction,
+        "short_cjk_template": retriever.encoder_profile.short_cjk_template,
+        "document_instruction": "",
+        "padding_side": retriever.encoder_profile.padding_side,
+        "max_length": max_length,
+        "schema_version": QWEN3_INDEX_SCHEMA_VERSION,
+        "source_title_count": sum(row.get("source_type") == "source_title" for row in rows),
         "source_sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
     }
     with tempfile.TemporaryDirectory(dir=output) as temp_dir:

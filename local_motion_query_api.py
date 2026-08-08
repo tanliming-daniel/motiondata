@@ -29,20 +29,21 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 
-DEFAULT_LOCAL_TRANSLATION_MODEL = Path("/data5/cy/animodata/server_bundle_full/opus-mt-zh-en")
-DEFAULT_LOCAL_TRANSLATION_DEVICE = -1
-DEFAULT_LOCAL_TRANSLATION_MAX_LENGTH = 128
-DEFAULT_ALIAS_ONLY_CJK_TEXT_LENGTH = 8
-DISABLED_TRANSLATION_MODEL_VALUES = {"0", "false", "none", "null", "off", "disabled"}
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlparse
-from urllib.request import Request, urlopen
 
 import motion_taxonomy
-from search_index import SearchIndex, SemanticRetriever
+from search_index import (
+    LocalReranker,
+    SearchIndex,
+    SemanticRetriever,
+    clean_motion_title,
+    clean_search_caption,
+    is_searchable_caption,
+    motion_series_key,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -68,9 +69,9 @@ FACET_CACHE_SIZE = 128
 API_PREFIX = "/api/v1"
 OPENAPI_PATH = "/openapi.json"
 LOCAL_ENCODER_NAME = "local_motion_lexical_bm25_v1"
-HYBRID_ENCODER_NAME = "local_motion_hybrid_rrf_v1"
-DEFAULT_SEARCH_RANDOMNESS = 0.12
-DEFAULT_TRANSLATION_TIMEOUT_SECONDS = 8.0
+HYBRID_ENCODER_NAME = "local_motion_hybrid_rerank_v2"
+DEFAULT_SEARCH_RANDOMNESS = 0.0
+DEFAULT_RERANK_CANDIDATES = 40
 MODEL_CONTENT_TYPE = "model/gltf-binary"
 
 
@@ -388,91 +389,8 @@ def first_query_value(query: dict[str, list[str]], name: str) -> str | None:
     return value or None
 
 
-class LocalTranslator:
-    def __init__(self, *, model_name: str, device: int, max_length: int) -> None:
-        self.model_name = model_name
-        self.device = device
-        self.max_length = max_length
-        self._tokenizer: Any | None = None
-        self._model: Any | None = None
-        self._torch: Any | None = None
-
-    def load(self) -> None:
-        if self._tokenizer is not None and self._model is not None and self._torch is not None:
-            return
-        try:
-            import torch
-            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        except ImportError as exc:
-            raise RuntimeError(
-                "Missing local translation dependencies. Install transformers, torch, and sentencepiece."
-            ) from exc
-
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
-
-        if self.device >= 0:
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA translation device requested but torch.cuda.is_available() is false.")
-            model = model.to(f"cuda:{self.device}")
-        else:
-            model = model.to("cpu")
-
-        model.eval()
-        self._tokenizer = tokenizer
-        self._model = model
-        self._torch = torch
-
-    def translate(self, text: str) -> str:
-        normalized_text = normalize_whitespace(text)
-        if not normalized_text:
-            raise RuntimeError("Text is empty.")
-        self.load()
-        assert self._tokenizer is not None
-        assert self._model is not None
-        assert self._torch is not None
-
-        encoded = self._tokenizer(normalized_text, return_tensors="pt")
-        if self.device >= 0:
-            encoded = {key: value.to(self._model.device) for key, value in encoded.items()}
-
-        with self._torch.no_grad():
-            generated = self._model.generate(**encoded, max_length=self.max_length)
-
-        translated_text = self._tokenizer.batch_decode(generated, skip_special_tokens=True)
-        if not translated_text:
-            raise RuntimeError("Translation model returned an empty translation.")
-        normalized_translation = normalize_whitespace(str(translated_text[0]))
-        if not normalized_translation:
-            raise RuntimeError("Translation model returned an empty translation.")
-        return normalized_translation
-
-
-def merge_search_text(translated_text: str, alias_tokens: list[str]) -> str:
-    merged_parts: list[str] = []
-    seen_tokens: set[str] = set()
-    for token in tokenize(translated_text):
-        if token not in seen_tokens:
-            merged_parts.append(token)
-            seen_tokens.add(token)
-    for token in alias_tokens:
-        if token not in seen_tokens:
-            merged_parts.append(token)
-            seen_tokens.add(token)
-    return normalize_whitespace(" ".join(merged_parts))
-
-
 def alias_tokens_to_search_text(alias_tokens: list[str]) -> str:
     return normalize_whitespace(" ".join(token for token in alias_tokens if token.isascii()))
-
-
-def should_use_alias_only_search(text: str, alias_tokens: list[str]) -> bool:
-    normalized_text = normalize_whitespace(text)
-    if not normalized_text or len(normalized_text) > DEFAULT_ALIAS_ONLY_CJK_TEXT_LENGTH:
-        return False
-    if not alias_tokens:
-        return False
-    return all(token.isascii() for token in alias_tokens)
 
 
 @dataclass(frozen=True)
@@ -484,6 +402,8 @@ class MotionEntry:
     caption_file: Path
     captions: tuple[str, ...]
     description: str
+    source_title: str
+    series_key: str
     cache_glb: Path
     search_text: str
     token_counts: Counter[str]
@@ -670,18 +590,19 @@ class MotionIndex:
         motion_id = normalize_whitespace(str(row.get("motion_id") or ""))
         source_motion = Path(str(row.get("source_motion") or ""))
         caption_file = Path(str(row.get("caption_file") or ""))
-        captions = tuple(normalize_whitespace(str(caption)) for caption in row.get("captions") or ())
-        captions = tuple(caption for caption in captions if caption)
+        captions = tuple(clean_search_caption(str(caption)) for caption in row.get("captions") or ())
+        captions = tuple(caption for caption in captions if is_searchable_caption(caption))
         description = normalize_whitespace(str(row.get("description") or (captions[0] if captions else "")))
         object_id = normalize_whitespace(str(row.get("object_id") or ""))
         frame_count = clamp_int(row.get("frame_count"), 0, minimum=0) or None
         if not object_id and dataset and motion_id:
             object_id = hashlib.sha256(f"{dataset}:{motion_id}:{source_motion}".encode("utf-8")).hexdigest()
-        if not dataset or not motion_id or not str(source_motion) or not captions or not object_id:
+        if not dataset or not motion_id or not str(source_motion) or not object_id:
             return None
 
         cache_glb = cache_root / dataset / f"{motion_id}.glb"
-        search_text = normalize_whitespace(" ".join([dataset, motion_id, description, *captions]))
+        source_title = clean_motion_title(dataset, motion_id)
+        search_text = normalize_whitespace(" ".join([dataset, motion_id, source_title, description, *captions]))
         token_counts = Counter(tokenize(search_text))
         return MotionEntry(
             object_id=object_id,
@@ -691,6 +612,8 @@ class MotionIndex:
             caption_file=caption_file,
             captions=captions,
             description=description,
+            source_title=source_title,
+            series_key=motion_series_key(dataset, motion_id),
             cache_glb=cache_glb,
             search_text=search_text,
             token_counts=token_counts,
@@ -758,6 +681,7 @@ class MotionIndex:
         limit: int = DEFAULT_PAGE_SIZE,
         offset: int = 0,
     ) -> tuple[list[tuple[MotionEntry, float | None]], int, float | None]:
+        matches: list[tuple[MotionEntry, float | None]]
         if q:
             scored = self.search_entries(q, top_k=None)
             max_score = scored[0][0] if scored else None
@@ -812,26 +736,32 @@ class MotionIndex:
                 self._hybrid_cache.move_to_end(cache_key)
                 return cached[: max(top_k, 1)] if top_k is not None else cached
         lexical = self.search_entries(query_text, top_k=candidate_k)
-        dense = semantic.search(semantic_query or query_text, top_k=candidate_k)
+        dense = semantic.search(semantic_query or query_text, top_k=min(candidate_k * 4, len(semantic.rows)))
         lexical_rank = {entry.object_id: rank for rank, (_score, entry) in enumerate(lexical, 1)}
         lexical_score = {entry.object_id: score for score, entry in lexical}
-        dense_by_id: dict[str, tuple[int, float, str]] = {}
+        dense_by_id: dict[str, tuple[int, float, str, str]] = {}
         for rank, (score, row) in enumerate(dense, 1):
             object_id = str(row.get("object_id") or "")
             if object_id and object_id not in dense_by_id:
-                dense_by_id[object_id] = (rank, score, str(row.get("caption") or ""))
+                dense_by_id[object_id] = (
+                    rank,
+                    score,
+                    str(row.get("caption") or ""),
+                    str(row.get("source_type") or "caption"),
+                )
         rows: list[tuple[float, MotionEntry, dict[str, Any]]] = []
         for object_id in set(lexical_rank) | set(dense_by_id):
             entry = self.entries_by_id.get(object_id)
             if entry is None:
                 continue
             lrank = lexical_rank.get(object_id)
-            drank, dscore, matched = dense_by_id.get(object_id, (None, 0.0, ""))
+            drank, dscore, matched, source_type = dense_by_id.get(object_id, (None, 0.0, "", ""))
             fused = (0.45 / (60 + lrank) if lrank else 0.0) + (0.55 / (60 + drank) if drank else 0.0)
             detail = {
                 "lexical_score": lexical_score.get(object_id, 0.0),
                 "semantic_score": dscore,
                 "matched_caption": matched,
+                "matched_source_type": source_type,
             }
             rows.append((fused, entry, detail))
         rows.sort(key=lambda item: (-item[0], item[1].dataset, item[1].motion_id))
@@ -998,15 +928,15 @@ class MotionQueryServer(ThreadingHTTPServer):
         interx_fps: float,
         converter_env: str | None,
         conda_exe: str,
-        translation_url: str | None = None,
-        translation_timeout: float = DEFAULT_TRANSLATION_TIMEOUT_SECONDS,
-        translation_model: str | None = None,
-        translation_device: int = DEFAULT_LOCAL_TRANSLATION_DEVICE,
-        translation_max_length: int = DEFAULT_LOCAL_TRANSLATION_MAX_LENGTH,
         semantic_model: str | None = None,
         semantic_index: Path | None = None,
         semantic_device: str = "auto",
         semantic_max_length: int = 256,
+        reranker_model: str | None = None,
+        reranker_device: str = "auto",
+        reranker_max_length: int = 128,
+        reranker_batch_size: int = 32,
+        search_prewarm: bool = False,
     ) -> None:
         super().__init__(server_address, request_handler)
         self.motion_index = motion_index
@@ -1017,29 +947,23 @@ class MotionQueryServer(ThreadingHTTPServer):
         self.interx_fps = interx_fps
         self.converter_env = converter_env
         self.conda_exe = conda_exe
-        self.translation_url = normalize_whitespace(translation_url or "") or None
-        normalized_translation_model = normalize_whitespace(translation_model or "")
-        if translation_model is not None and not normalized_translation_model:
-            self.translation_model = None
-        elif normalized_translation_model.lower() in DISABLED_TRANSLATION_MODEL_VALUES:
-            self.translation_model = None
-        elif normalized_translation_model:
-            self.translation_model = normalized_translation_model
-        elif DEFAULT_LOCAL_TRANSLATION_MODEL.exists():
-            self.translation_model = str(DEFAULT_LOCAL_TRANSLATION_MODEL)
-        else:
-            self.translation_model = None
-        self.translation_device = translation_device
-        self.translation_max_length = max(1, translation_max_length)
-        self.translation_timeout = max(0.1, translation_timeout)
         self.semantic_model = normalize_whitespace(semantic_model or "") or None
-        self.semantic_index = (semantic_index or SCRIPT_DIR / "dataset" / "semantic_index").expanduser().resolve()
+        self.semantic_index = (
+            semantic_index or SCRIPT_DIR / "dataset" / "semantic_index_qwen3_06b"
+        ).expanduser().resolve()
         self.semantic_device = semantic_device
         self.semantic_max_length = semantic_max_length
         self._semantic_retriever: SemanticRetriever | None = None
         self._semantic_lock = threading.Lock()
-        self._translator: LocalTranslator | None = None
-        self._translator_lock = threading.Lock()
+        self.semantic_error: str | None = None
+        self.reranker_model = normalize_whitespace(reranker_model or "") or None
+        self.reranker_device = reranker_device
+        self.reranker_max_length = reranker_max_length
+        self.reranker_batch_size = reranker_batch_size
+        self.search_prewarm = search_prewarm
+        self._reranker: LocalReranker | None = None
+        self._reranker_lock = threading.Lock()
+        self.reranker_error: str | None = None
         self._lock_guard = threading.Lock()
         self._conversion_locks: dict[str, threading.Lock] = {}
 
@@ -1051,32 +975,68 @@ class MotionQueryServer(ThreadingHTTPServer):
                 self._conversion_locks[object_id] = lock
             return lock
 
-    def local_translator(self) -> LocalTranslator | None:
-        if not self.translation_model:
-            return None
-        with self._translator_lock:
-            if self._translator is None:
-                self._translator = LocalTranslator(
-                    model_name=self.translation_model,
-                    device=self.translation_device,
-                    max_length=self.translation_max_length,
-                )
-            return self._translator
-
     def semantic_retriever(self) -> SemanticRetriever | None:
         if not self.semantic_model:
             return None
         with self._semantic_lock:
-            if self._semantic_retriever is None:
-                self._semantic_retriever = SemanticRetriever(
+            if self._semantic_retriever is not None:
+                return self._semantic_retriever
+            if self.semantic_error is not None:
+                return None
+            try:
+                retriever = SemanticRetriever(
                     self.semantic_index, self.semantic_model, self.semantic_device, self.semantic_max_length
                 )
-            return self._semantic_retriever if self._semantic_retriever.available else None
+                if not retriever.available:
+                    self.semantic_error = f"Qwen3 semantic index is unavailable: {self.semantic_index}"
+                    return None
+                self._semantic_retriever = retriever
+                return retriever
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.semantic_error = str(exc)
+                return None
+
+    def semantic_encoder_name(self) -> str:
+        if not self.semantic_model:
+            return LOCAL_ENCODER_NAME
+        return Path(self.semantic_model).name or self.semantic_model
+
+    def local_reranker(self) -> LocalReranker | None:
+        if not self.reranker_model:
+            return None
+        with self._reranker_lock:
+            if self._reranker is None:
+                self._reranker = LocalReranker(
+                    self.reranker_model,
+                    self.reranker_device,
+                    self.reranker_max_length,
+                    self.reranker_batch_size,
+                )
+            return self._reranker
+
+    def prewarm_search(self) -> None:
+        try:
+            semantic = self.semantic_retriever()
+            if semantic is not None:
+                semantic.search("a person walks", top_k=8)
+                self.semantic_error = None
+        except Exception as exc:
+            self.semantic_error = str(exc)
+        try:
+            reranker = self.local_reranker()
+            if reranker is not None:
+                reranker.score([("a person walks", "a person is walking forward")])
+            self.reranker_error = None
+        except Exception as exc:
+            self.reranker_error = str(exc)
 
 
 class MotionQueryRequestHandler(BaseHTTPRequestHandler):
-    server: MotionQueryServer
     server_version = "MultimotionLazyQueryAPI/1.0"
+
+    @property
+    def app_server(self) -> MotionQueryServer:
+        return cast(MotionQueryServer, self.server)
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -1106,11 +1066,11 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             self._send_static_file(relative_path)
             return
         if path == f"{API_PREFIX}/stats":
-            self._send_json(HTTPStatus.OK, {"status": "ok", "data": self.server.motion_index.get_summary()})
+            self._send_json(HTTPStatus.OK, {"status": "ok", "data": self.app_server.motion_index.get_summary()})
             return
         if path == f"{API_PREFIX}/taxonomy":
             started = time.perf_counter()
-            aggregate, direct = self.server.motion_index.taxonomy_counts()
+            aggregate, direct = self.app_server.motion_index.taxonomy_counts()
             compact = first_query_value(query, "view") == "compact"
             payload = motion_taxonomy.taxonomy_payload(
                 counts=aggregate,
@@ -1118,7 +1078,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 include_nodes=not compact,
             )
             payload["default_facets"] = {
-                axis: self.server.motion_index.default_library_facets.get(axis, {})
+                axis: self.app_server.motion_index.default_library_facets.get(axis, {})
                 for axis in ("dataset", "participants")
             }
             self._send_json(
@@ -1177,7 +1137,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         search_query = first_query_value(query, "q")
         dataset_filter = first_query_value(query, "dataset")
         try:
-            page, total_count, max_score = self.server.motion_index.list_entries(
+            page, total_count, max_score = self.app_server.motion_index.list_entries(
                 q=search_query,
                 dataset=dataset_filter,
                 limit=limit,
@@ -1214,7 +1174,12 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         dataset_filter = first_query_value(query, "dataset")
         sort_key = first_query_value(query, "sort") or "relevance"
         search_query = first_query_value(query, "q") or first_query_value(query, "search")
-        retrieval_mode = (first_query_value(query, "retrieval_mode") or "lexical").lower()
+        retrieval_mode = (first_query_value(query, "retrieval_mode") or "hybrid").lower()
+        use_reranker = parse_bool(first_query_value(query, "rerank"), True)
+        use_diversity = parse_bool(first_query_value(query, "diversity"), True)
+        if search_query and contains_cjk(search_query):
+            use_reranker = False
+            use_diversity = False
         if retrieval_mode not in {"lexical", "semantic", "hybrid"}:
             self._send_error_json(HTTPStatus.BAD_REQUEST, "retrieval_mode must be lexical, semantic, or hybrid")
             return
@@ -1226,6 +1191,9 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.BAD_REQUEST, f"Unknown taxonomy node: {node_filter}")
             return
         axis_filters = {axis: first_query_value(query, axis) for axis in motion_taxonomy.AXIS_ORDER}
+        scored_entries: list[tuple[MotionEntry, float | None]]
+        rows: list[tuple[MotionEntry, float | None, dict[str, Any]]]
+        page: list[tuple[MotionEntry, float | None, dict[str, Any]]]
 
         use_default_snapshot = (
             not search_query
@@ -1236,39 +1204,39 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         )
 
         if use_default_snapshot:
-            total_count = len(self.server.motion_index._sorted_entries)
-            entries = self.server.motion_index._sorted_entries[offset : offset + limit]
+            total_count = len(self.app_server.motion_index._sorted_entries)
+            entries = self.app_server.motion_index._sorted_entries[offset : offset + limit]
             page = [
-                (entry, None, self.server.motion_index.library_classifications[entry.object_id])
+                (entry, None, self.app_server.motion_index.library_classifications[entry.object_id])
                 for entry in entries
             ]
-            facets = self.server.motion_index.default_library_facets if include_facets else {}
-            hierarchy = None if compact else self.server.motion_index.default_library_hierarchy
+            facets = self.app_server.motion_index.default_library_facets if include_facets else {}
+            hierarchy = None if compact else self.app_server.motion_index.default_library_hierarchy
             max_score = None
         else:
             filter_started = time.perf_counter()
             try:
                 if search_query:
-                    semantic = self.server.semantic_retriever() if retrieval_mode in {"semantic", "hybrid"} else None
+                    semantic = self.app_server.semantic_retriever() if retrieval_mode in {"semantic", "hybrid"} else None
                     if retrieval_mode in {"semantic", "hybrid"} and semantic is not None:
-                        hybrid = self.server.motion_index.search_hybrid(search_query, semantic, top_k=None)
+                        hybrid = self.app_server.motion_index.search_hybrid(search_query, semantic, top_k=None)
                         scored = [(score, entry) for score, entry, _detail in hybrid]
                     else:
-                        scored = self.server.motion_index.search_entries(search_query, top_k=None)
+                        scored = self.app_server.motion_index.search_entries(search_query, top_k=None)
                         if retrieval_mode in {"semantic", "hybrid"}:
                             retrieval_mode = "lexical"
                     scored_entries = [(entry, score) for score, entry in scored]
                     base_ids = {entry.object_id for entry, _score in scored_entries}
                     max_score = scored[0][0] if scored else None
                 else:
-                    scored_entries = [] if compact else [(entry, None) for entry in self.server.motion_index._sorted_entries]
-                    base_ids = self.server.motion_index.all_entry_ids
+                    scored_entries = [] if compact else [(entry, None) for entry in self.app_server.motion_index._sorted_entries]
+                    base_ids = self.app_server.motion_index.all_entry_ids
                     max_score = None
             except ValueError as exc:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
             if compact:
-                index = self.server.motion_index
+                index = self.app_server.motion_index
                 base_mask = index.entries_to_mask([entry for entry, _score in scored_entries]) if search_query else index.all_entry_mask
                 result_mask = self._filter_library_mask(
                     base_mask,
@@ -1317,7 +1285,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                     axis_filters=axis_filters,
                 )
                 rows = [
-                    (entry, score, self.server.motion_index.library_classifications[entry.object_id])
+                    (entry, score, self.app_server.motion_index.library_classifications[entry.object_id])
                     for entry, score in scored_entries
                     if entry.object_id in result_ids
                 ]
@@ -1331,6 +1299,37 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 timings["filter"] = (time.perf_counter() - filter_started) * 1000
             total_count = len(rows)
             rows = self._sort_library_rows(rows, sort_key)
+            if (
+                search_query
+                and sort_key == "relevance"
+                and retrieval_mode in {"semantic", "hybrid"}
+                and (use_reranker or use_diversity)
+            ):
+                ranked = [
+                    (score or 0.0, entry)
+                    for entry, score, _classification in rows[:DEFAULT_RERANK_CANDIDATES]
+                ]
+                rerank_succeeded = not use_reranker
+                if use_reranker:
+                    ranked, _details, rerank_warning = self._rerank_semantic_candidates(search_query, ranked)
+                    rerank_succeeded = rerank_warning is None
+                if use_diversity and rerank_succeeded:
+                    ranked = self._diversify_candidates(ranked)
+                ranked_ids = {
+                    entry.object_id: (position, score)
+                    for position, (score, entry) in enumerate(ranked)
+                }
+                rows = sorted(
+                    rows,
+                    key=lambda item: (
+                        ranked_ids.get(item[0].object_id, (DEFAULT_RERANK_CANDIDATES, 0.0))[0],
+                        -(item[1] or 0.0),
+                    ),
+                )
+                rows = [
+                    (entry, ranked_ids.get(entry.object_id, (0, score or 0.0))[1], classification)
+                    for entry, score, classification in rows
+                ]
             page = rows[offset : offset + limit]
             hierarchy = None if compact else motion_taxonomy.taxonomy_payload(
                     counts=facets.get("action_node", {}),
@@ -1367,13 +1366,21 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             },
             "sort": sort_key,
             "retrieval_mode": retrieval_mode,
+            "selected_encoder": (
+                self.app_server.semantic_encoder_name()
+                if retrieval_mode in {"semantic", "hybrid"}
+                else LOCAL_ENCODER_NAME
+            ),
+            "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
+            "rerank": use_reranker,
+            "diversity": use_diversity,
         }
         if compact:
-            response["global_total"] = len(self.server.motion_index.entries)
+            response["global_total"] = len(self.app_server.motion_index.entries)
         else:
             response["data"] = data
             response["hierarchy"] = hierarchy
-            response["summary"] = self.server.motion_index.get_summary()
+            response["summary"] = self.app_server.motion_index.get_summary()
         timings["total"] = (time.perf_counter() - request_started) * 1000
         self._send_json(
             HTTPStatus.OK,
@@ -1385,7 +1392,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _sparse_facets(self, facets: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
-        visible = set(self.server.motion_index.visible_node_ids)
+        visible = set(self.app_server.motion_index.visible_node_ids)
         return {
             axis: {
                 key: count for key, count in values.items()
@@ -1405,7 +1412,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         excluded_facet: str | None = None,
     ) -> set[str]:
         result = set(base_ids)
-        index = self.server.motion_index
+        index = self.app_server.motion_index
         if dataset_filter and excluded_facet != "dataset":
             result.intersection_update(index.dataset_entry_ids.get(dataset_filter.strip().lower(), set()))
         if node_filter and excluded_facet != "action_node":
@@ -1427,7 +1434,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         excluded_facet: str | None = None,
     ) -> int:
         result = base_mask
-        index = self.server.motion_index
+        index = self.app_server.motion_index
         if dataset_filter and excluded_facet != "dataset":
             result &= index.dataset_entry_masks.get(dataset_filter.strip().lower(), 0)
         if node_filter and excluded_facet != "action_node":
@@ -1447,7 +1454,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         include_descendants: bool,
         axis_filters: dict[str, str | None],
     ) -> dict[str, dict[str, int]]:
-        index = self.server.motion_index
+        index = self.app_server.motion_index
         dataset_scope = self._filter_library_mask(
             base_mask,
             dataset_filter=dataset_filter,
@@ -1502,7 +1509,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         include_descendants: bool,
         axis_filters: dict[str, str | None],
     ) -> dict[str, dict[str, int]]:
-        index = self.server.motion_index
+        index = self.app_server.motion_index
         dataset_scope = self._filter_library_ids(
             base_ids,
             dataset_filter=dataset_filter,
@@ -1556,13 +1563,13 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         if sort_key == "motion_id":
             return sorted(rows, key=lambda item: (item[0].dataset, item[0].motion_id))
         if sort_key == "frame_count_desc":
-            return sorted(rows, key=lambda item: (-(self.server.motion_index.frame_count_for(item[0]) or 0), item[0].dataset, item[0].motion_id))
+            return sorted(rows, key=lambda item: (-(self.app_server.motion_index.frame_count_for(item[0]) or 0), item[0].dataset, item[0].motion_id))
         if any(score is not None for _entry, score, _classification in rows):
             return sorted(rows, key=lambda item: (-(item[1] or 0.0), item[0].dataset, item[0].motion_id))
         return sorted(rows, key=lambda item: (item[0].dataset, item[0].motion_id))
 
     def _handle_entry_detail(self, object_id: str) -> None:
-        entry = self.server.motion_index.get_entry(object_id)
+        entry = self.app_server.motion_index.get_entry(object_id)
         if entry is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Unknown object_id: {object_id}")
             return
@@ -1581,26 +1588,36 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.BAD_REQUEST, "Provide a text query in the 'text' field.")
             return
 
-        search_text, translation_info = self._prepare_search_text(text, warnings)
+        search_text = self._prepare_search_text(text)
         top_k = clamp_int(payload.get("top_k", 5), 5, minimum=1, maximum=MAX_PAGE_SIZE)
         candidate_k = clamp_int(payload.get("candidate_k", 200), 200, minimum=1)
         candidate_k = max(candidate_k, top_k)
         include_model_info = parse_bool(payload.get("include_model_info"), True)
         randomness = clamp_float(payload.get("randomness", DEFAULT_SEARCH_RANDOMNESS), DEFAULT_SEARCH_RANDOMNESS, maximum=1.0)
         random_seed = payload.get("random_seed")
-        retrieval_mode = str(payload.get("retrieval_mode") or "lexical").lower()
+        retrieval_mode = str(payload.get("retrieval_mode") or "hybrid").lower()
+        use_reranker = parse_bool(payload.get("rerank"), True)
+        use_diversity = parse_bool(payload.get("diversity"), True)
+        if use_reranker and contains_cjk(text):
+            use_reranker = False
+            use_diversity = False
+            warnings.append(
+                "Reranking and diversity are bypassed for CJK queries because the indexed captions are English."
+            )
         if retrieval_mode not in {"lexical", "semantic", "hybrid"}:
             self._send_error_json(HTTPStatus.BAD_REQUEST, "retrieval_mode must be lexical, semantic, or hybrid")
             return
 
         try:
             explanations: dict[str, dict[str, Any]] = {}
-            semantic = self.server.semantic_retriever() if retrieval_mode in {"semantic", "hybrid"} else None
+            semantic = self.app_server.semantic_retriever() if retrieval_mode in {"semantic", "hybrid"} else None
             if retrieval_mode in {"semantic", "hybrid"} and semantic is None:
-                warnings.append("Semantic retrieval is unavailable; fell back to lexical retrieval.")
+                detail = f": {self.app_server.semantic_error}" if self.app_server.semantic_error else ""
+                warnings.append(f"Semantic retrieval is unavailable{detail}; fell back to lexical retrieval.")
                 retrieval_mode = "lexical"
             if retrieval_mode == "hybrid":
-                hybrid = self.server.motion_index.search_hybrid(
+                assert semantic is not None
+                hybrid = self.app_server.motion_index.search_hybrid(
                     search_text,
                     semantic,
                     top_k=candidate_k,
@@ -1610,11 +1627,12 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 candidates = [(score, entry) for score, entry, detail in hybrid]
                 explanations = {entry.object_id: detail for _score, entry, detail in hybrid}
             elif retrieval_mode == "semantic":
+                assert semantic is not None
                 dense = semantic.search(text, top_k=candidate_k)
                 candidates = []
                 seen: set[str] = set()
                 for score, row in dense:
-                    entry = self.server.motion_index.get_entry(str(row.get("object_id") or ""))
+                    entry = self.app_server.motion_index.get_entry(str(row.get("object_id") or ""))
                     if entry is not None and entry.object_id not in seen:
                         seen.add(entry.object_id)
                         candidates.append((score, entry))
@@ -1624,27 +1642,46 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                             "lexical_score": 0.0,
                         }
             else:
-                candidates = self.server.motion_index.search_entries(search_text, top_k=candidate_k)
+                candidates = self.app_server.motion_index.search_entries(search_text, top_k=candidate_k)
         except (ValueError, RuntimeError) as exc:
             if retrieval_mode in {"semantic", "hybrid"}:
                 warnings.append(f"Semantic retrieval failed; fell back to lexical retrieval: {exc}")
                 retrieval_mode = "lexical"
-                candidates = self.server.motion_index.search_entries(search_text, top_k=candidate_k)
+                candidates = self.app_server.motion_index.search_entries(search_text, top_k=candidate_k)
                 explanations = {}
             else:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
                 return
-        max_score = candidates[0][0] if candidates else None
+        if retrieval_mode in {"semantic", "hybrid"} and (use_reranker or use_diversity):
+            ranked = candidates[:DEFAULT_RERANK_CANDIDATES]
+            remaining = candidates[DEFAULT_RERANK_CANDIDATES:]
+            rerank_succeeded = not use_reranker
+            if use_reranker:
+                ranked, rerank_details, rerank_warning = self._rerank_semantic_candidates(text, ranked)
+                rerank_succeeded = rerank_warning is None
+                for object_id, detail in rerank_details.items():
+                    explanations.setdefault(object_id, {}).update(detail)
+                if rerank_warning:
+                    warnings.append(rerank_warning)
+            if use_diversity and rerank_succeeded:
+                ranked = self._diversify_candidates(ranked)
+            candidates = [*ranked, *remaining]
+        max_score = max((score for score, _entry in candidates), default=None)
         results = self._rerank_results(candidates, top_k=top_k, randomness=randomness, random_seed=random_seed)
         data = [
             self._serialize_entry(entry, include_model_info=include_model_info, score=score, max_score=max_score, retrieval=explanations.get(entry.object_id))
             for score, entry in results
         ]
+        selected_encoder = (
+            self.app_server.semantic_encoder_name()
+            if retrieval_mode in {"semantic", "hybrid"}
+            else LOCAL_ENCODER_NAME
+        )
 
         common = {
             "query_mode": "text",
             "requested_encoder": payload.get("encoder"),
-            "selected_encoder": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
+            "selected_encoder": selected_encoder,
             "top_k": top_k,
             "candidate_k": candidate_k,
             "candidate_count": len(candidates),
@@ -1656,7 +1693,9 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "query_text": text,
             "search_text": search_text,
             "retrieval_mode": retrieval_mode,
-            "translation": translation_info,
+            "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
+            "rerank": use_reranker,
+            "diversity": use_diversity,
             "data": data,
         }
         if legacy_mode:
@@ -1665,14 +1704,17 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 **common,
                 "index": {
                     "encoder_name": LOCAL_ENCODER_NAME,
-                    "db_path": str(self.server.motion_index.source_path),
+                    "db_path": str(self.app_server.motion_index.source_path),
                     "source_type": "motion_index_jsonl",
-                    "dataset_root": str(self.server.motion_index.cache_root),
+                    "dataset_root": str(self.app_server.motion_index.cache_root),
                     "feature_dim": None,
                     "supports_text": True,
                     "lazy_conversion": True,
+                    "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
+                    "rerank": use_reranker,
+                    "diversity": use_diversity,
                 },
-                "meta": {"result_count": len(data), "entry_count": len(self.server.motion_index.entries)},
+                "meta": {"result_count": len(data), "entry_count": len(self.app_server.motion_index.entries)},
                 "links": {
                     "self": self._absolute_url("/query"),
                     "rest_search": self._absolute_url(f"{API_PREFIX}/searches"),
@@ -1681,15 +1723,18 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         else:
             response = {
                 "status": "ok",
+                "retrieval_mode": retrieval_mode,
+                "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
+                "rerank": use_reranker,
+                "diversity": use_diversity,
                 "query": {
                     "mode": "text",
                     "text": text,
                     "search_text": search_text,
-                    "translation": translation_info,
                     "top_k": top_k,
                     "candidate_k": candidate_k,
                     "requested_encoder": payload.get("encoder"),
-                    "selected_encoder": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
+                    "selected_encoder": selected_encoder,
                     "candidate_count": len(candidates),
                     "retrieval_mode": retrieval_mode,
                     "randomness": randomness,
@@ -1699,7 +1744,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 "results": data,
                 "meta": {
                     "result_count": len(data),
-                    "entry_count": len(self.server.motion_index.entries),
+                    "entry_count": len(self.app_server.motion_index.entries),
                     "supports_text": True,
                     "lazy_conversion": True,
                 },
@@ -1708,104 +1753,10 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             }
         self._send_json(HTTPStatus.OK, response)
 
-    def _prepare_search_text(self, text: str, warnings: list[str]) -> tuple[str, dict[str, Any] | None]:
+    def _prepare_search_text(self, text: str) -> str:
         if not contains_cjk(text):
-            return text, None
-        alias_tokens = tokenize(text)
-        translation_info: dict[str, Any] = {
-            "status": "skipped",
-            "provider": None,
-            "translation_url": self.server.translation_url,
-            "translation_model": self.server.translation_model,
-            "original_text": text,
-            "translated_text": None,
-            "used_for_search": False,
-            "source_alias_tokens": alias_tokens,
-        }
-        alias_search_text = alias_tokens_to_search_text(alias_tokens)
-        if should_use_alias_only_search(text, alias_tokens):
-            translation_info["status"] = "alias_only"
-            translation_info["provider"] = "builtin_alias"
-            translation_info["used_for_search"] = True
-            translation_info["augmented_search_text"] = alias_search_text
-            return alias_search_text, translation_info
-        try:
-            translated_text, provider = self._translate_query_text(text)
-        except Exception as exc:
-            translation_info["status"] = "failed"
-            translation_info["message"] = str(exc)
-            if alias_search_text:
-                warnings.append(f"Translation failed: {exc}; using local aliases only.")
-                translation_info["provider"] = "builtin_alias"
-                translation_info["used_for_search"] = True
-                translation_info["augmented_search_text"] = alias_search_text
-                translation_info["fallback_provider"] = "builtin_alias"
-                return alias_search_text, translation_info
-            warnings.append(f"Translation failed: {exc}; using original query text.")
-            return text, translation_info
-        if not translated_text:
-            if alias_search_text:
-                warnings.append("Translation is unavailable; using local aliases only.")
-                translation_info["status"] = "alias_only"
-                translation_info["provider"] = "builtin_alias"
-                translation_info["used_for_search"] = True
-                translation_info["augmented_search_text"] = alias_search_text
-                return alias_search_text, translation_info
-            warnings.append("Translation is unavailable; using original query text.")
-            return text, translation_info
-        augmented = merge_search_text(translated_text, alias_tokens)
-        translation_info["status"] = "ok"
-        translation_info["provider"] = provider
-        translation_info["translated_text"] = translated_text
-        translation_info["used_for_search"] = True
-        translation_info["augmented_search_text"] = augmented
-        return augmented, translation_info
-
-    def _translate_query_text(self, text: str) -> tuple[str | None, str | None]:
-        errors: list[str] = []
-        translator = self.server.local_translator()
-        if translator is not None:
-            try:
-                translated_text = translator.translate(text)
-                return translated_text, "local_transformers"
-            except Exception as exc:
-                errors.append(f"local_transformers: {exc}")
-        if self.server.translation_url:
-            try:
-                translated_text = self._translate_query_text_external(text)
-                return translated_text, "external_http"
-            except Exception as exc:
-                errors.append(f"external_http: {exc}")
-        if errors:
-            raise RuntimeError("; ".join(errors))
-        return None, None
-
-    def _translate_query_text_external(self, text: str) -> str:
-        request_payload = {"text": text, "source": "zh", "target": "en"}
-        request = Request(
-            self.server.translation_url,
-            data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=self.server.translation_timeout) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Network error: {exc}") from exc
-        if not isinstance(response_payload, dict):
-            raise RuntimeError("Translation service response must be a JSON object.")
-        translated_text = response_payload.get("translated_text")
-        if not isinstance(translated_text, str):
-            data = response_payload.get("data")
-            if isinstance(data, dict):
-                translated_text = data.get("translated_text")
-        if not isinstance(translated_text, str):
-            raise RuntimeError("Translation service response does not contain 'translated_text'.")
-        return translated_text
+            return text
+        return alias_tokens_to_search_text(tokenize(text)) or text
 
     def _rerank_results(
         self,
@@ -1829,6 +1780,99 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             selected.append(chosen)
             remaining.remove(chosen)
         return selected
+
+    def _rerank_semantic_candidates(
+        self,
+        query: str,
+        candidates: list[tuple[float, MotionEntry]],
+    ) -> tuple[list[tuple[float, MotionEntry]], dict[str, dict[str, Any]], str | None]:
+        reranker = self.app_server.local_reranker()
+        if not candidates or reranker is None:
+            warning = None if not candidates else "Reranker is unavailable; kept hybrid ranking."
+            return candidates, {}, warning
+
+        pairs: list[tuple[str, str]] = []
+        pair_ranges: list[tuple[int, int]] = []
+        for _score, entry in candidates:
+            start = len(pairs)
+            if entry.source_title:
+                pairs.append((query, entry.source_title))
+            documents = [entry.description, *entry.captions]
+            document = " ".join(dict.fromkeys(text for text in documents if is_searchable_caption(text)))
+            pairs.append((query, document[:3000]))
+            pair_ranges.append((start, len(pairs)))
+        try:
+            scores = reranker.score(pairs)
+            self.app_server.reranker_error = None
+        except Exception as exc:
+            self.app_server.reranker_error = str(exc)
+            return candidates, {}, f"Reranking failed; kept hybrid ranking: {exc}"
+
+        normalized_query = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", query.casefold()).strip()
+        reranked: list[tuple[float, MotionEntry]] = []
+        details: dict[str, dict[str, Any]] = {}
+        for (base_score, entry), (start, end) in zip(candidates, pair_ranges):
+            item_scores = scores[start:end]
+            title_score = item_scores[0] if entry.source_title and len(item_scores) > 1 else None
+            caption_score = item_scores[-1]
+            if title_score is None:
+                score = caption_score
+            else:
+                # A noisy generated caption may help, but cannot outweigh a contradictory source title.
+                score = max(title_score, min(caption_score, title_score + 1.0))
+            normalized_id = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", entry.motion_id.casefold()).strip()
+            normalized_title = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", entry.source_title.casefold()).strip()
+            exact_match = normalized_query in {normalized_id, normalized_title}
+            if exact_match:
+                score += 100.0
+            score += min(base_score, 1.0) * 0.01
+            reranked.append((score, entry))
+            details[entry.object_id] = {
+                "reranker_score": round(score, 6),
+                "title_score": round(title_score, 6) if title_score is not None else None,
+                "caption_score": round(caption_score, 6),
+                "source_title": entry.source_title or None,
+                "exact_source_match": exact_match,
+            }
+        reranked.sort(key=lambda item: (-item[0], item[1].dataset, item[1].motion_id))
+        return reranked, details, None
+
+    def _diversify_candidates(
+        self,
+        candidates: list[tuple[float, MotionEntry]],
+    ) -> list[tuple[float, MotionEntry]]:
+        if len(candidates) < 2:
+            return candidates
+        selected: list[tuple[float, MotionEntry]] = []
+        remaining = list(candidates)
+        minimum = min(score for score, _entry in candidates)
+        maximum = max(score for score, _entry in candidates)
+        scale = max(maximum - minimum, 1e-6)
+        while remaining:
+            best = max(
+                remaining,
+                key=lambda item: (
+                    (item[0] - minimum) / scale
+                    - min(
+                        0.75,
+                        0.15 * sum(self._entry_similarity(item[1], chosen[1]) for chosen in selected),
+                    ),
+                    item[0],
+                    item[1].motion_id,
+                ),
+            )
+            selected.append(best)
+            remaining.remove(best)
+        return selected
+
+    @staticmethod
+    def _entry_similarity(left: MotionEntry, right: MotionEntry) -> float:
+        if left.series_key and left.series_key == right.series_key:
+            return 1.0
+        left_tokens = set(tokenize(left.source_title or left.description))
+        right_tokens = set(tokenize(right.source_title or right.description))
+        union = left_tokens | right_tokens
+        return len(left_tokens & right_tokens) / len(union) if union else 0.0
 
     @staticmethod
     def _weighted_random_candidate(
@@ -1877,7 +1921,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 "motion_id": entry.motion_id,
                 "description": entry.description,
                 "captions": list(entry.captions),
-                "frame_count": self.server.motion_index.frame_count_for(entry),
+                "frame_count": self.app_server.motion_index.frame_count_for(entry),
                 "preview": {
                     "available": True,
                     "download_path": preview_download_path,
@@ -1906,14 +1950,14 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "motion_id": entry.motion_id,
             "description": entry.description,
             "captions": list(entry.captions),
-            "frame_count": self.server.motion_index.frame_count_for(entry),
+            "frame_count": self.app_server.motion_index.frame_count_for(entry),
             "source_motion": str(entry.source_motion),
             "caption_file": str(entry.caption_file),
             "preview": {
                 "available": preview_available,
                 "download_path": preview_download_path,
                 "download_url": self._absolute_url(preview_download_path),
-                "rotation_degrees": 0.0 if preview_is_canonical else self.server.motion_index.preview_rotation_for(entry),
+                "rotation_degrees": 0.0 if preview_is_canonical else self.app_server.motion_index.preview_rotation_for(entry),
             },
             "animal": entry.dataset,
             "track_name": entry.motion_id,
@@ -1968,7 +2012,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
     def _handle_preview_download(self, preview_id: str) -> None:
         suffix = ".webp" if preview_id.endswith(".webp") else ".png" if preview_id.endswith(".png") else ""
         object_id = preview_id[: -len(suffix)] if suffix else preview_id
-        entry = self.server.motion_index.get_entry(object_id)
+        entry = self.app_server.motion_index.get_entry(object_id)
         if entry is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Unknown object_id: {object_id}")
             return
@@ -1996,22 +2040,22 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         self._write_response_body(data)
 
     def _handle_model_download(self, object_id: str) -> None:
-        entry = self.server.motion_index.get_entry(object_id)
+        entry = self.app_server.motion_index.get_entry(object_id)
         if entry is None:
             self._send_error_json(HTTPStatus.NOT_FOUND, f"Unknown object_id: {object_id}")
             return
-        with self.server.conversion_lock_for(entry.object_id):
+        with self.app_server.conversion_lock_for(entry.object_id):
             job_dir: Path | None = None
             response_started = False
             try:
                 model_path, job_dir = create_temporary_glb(
                     entry,
-                    model_dir=self.server.model_dir,
-                    frame_step=self.server.frame_step,
-                    interx_fps=self.server.interx_fps,
-                    converter_env=self.server.converter_env,
-                    conda_exe=self.server.conda_exe,
-                    temp_root=self.server.temp_root,
+                    model_dir=self.app_server.model_dir,
+                    frame_step=self.app_server.frame_step,
+                    interx_fps=self.app_server.interx_fps,
+                    converter_env=self.app_server.converter_env,
+                    conda_exe=self.app_server.conda_exe,
+                    temp_root=self.app_server.temp_root,
                 )
                 file_size = model_path.stat().st_size
                 self.send_response(HTTPStatus.OK)
@@ -2044,7 +2088,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                     shutil.rmtree(job_dir, ignore_errors=True)
 
     def _build_root_payload(self) -> dict[str, Any]:
-        summary = self.server.motion_index.get_summary()
+        summary = self.app_server.motion_index.get_summary()
         return {
             "service": "multimotion-lazy-query-api",
             "version": "1.0",
@@ -2069,7 +2113,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         }
 
     def _build_health_payload(self) -> dict[str, Any]:
-        summary = self.server.motion_index.get_summary()
+        summary = self.app_server.motion_index.get_summary()
         return {
             "status": "ok",
             "entry_count": summary["entry_count"],
@@ -2078,16 +2122,24 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             "preview_root": summary["preview_root"],
             "lazy_conversion": True,
             "semantic_retrieval": {
-                "configured": bool(self.server.semantic_model),
-                "index": str(self.server.semantic_index),
-                "model": self.server.semantic_model,
+                "configured": bool(self.app_server.semantic_model),
+                "index": str(self.app_server.semantic_index),
+                "model": self.app_server.semantic_model,
+                "loaded": bool(self.app_server._semantic_retriever and self.app_server._semantic_retriever._model is not None),
+                "encoder": self.app_server.semantic_encoder_name(),
+                "error": self.app_server.semantic_error,
+                "manifest": (
+                    self.app_server._semantic_retriever.manifest
+                    if self.app_server._semantic_retriever is not None
+                    else None
+                ),
             },
-            "translation": {
-                "enabled": bool(self.server.translation_model or self.server.translation_url),
-                "url": self.server.translation_url,
-                "model": self.server.translation_model,
-                "device": self.server.translation_device,
-                "timeout_seconds": self.server.translation_timeout,
+            "reranker": {
+                "configured": bool(self.app_server.reranker_model),
+                "model": self.app_server.reranker_model,
+                "device": self.app_server.reranker_device,
+                "loaded": bool(self.app_server._reranker and self.app_server._reranker.loaded),
+                "error": self.app_server.reranker_error,
             },
         }
 
@@ -2195,7 +2247,8 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
     def _base_url(self) -> str:
         host = self.headers.get("X-Forwarded-Host") or self.headers.get("Host")
         if not host:
-            bind_host, bind_port = self.server.server_address
+            bind_host = self.app_server.server_address[0]
+            bind_port = self.app_server.server_address[1]
             host = f"{bind_host}:{bind_port}"
         scheme = self.headers.get("X-Forwarded-Proto")
         if not scheme:
@@ -2296,34 +2349,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interx-fps", type=float, default=DEFAULT_INTERX_FPS, help="Frame rate used for InterX GLB export.")
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind host. Default: {DEFAULT_HOST}")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Bind port. Default: {DEFAULT_PORT}")
-    parser.add_argument("--translation-url", default=None, help="Optional external Chinese-to-English translation endpoint.")
+    parser.add_argument("--semantic-model", default=None, help="Local Qwen3-Embedding model directory.")
     parser.add_argument(
-        "--translation-model",
-        default=str(DEFAULT_LOCAL_TRANSLATION_MODEL) if DEFAULT_LOCAL_TRANSLATION_MODEL.exists() else None,
-        help="Optional local Chinese-to-English model path or Hugging Face model name used directly inside the API process. Use none/off to disable.",
+        "--semantic-index",
+        default=str(SCRIPT_DIR / "dataset" / "semantic_index_qwen3_06b"),
+        help="Qwen3 caption index directory.",
     )
-    parser.add_argument(
-        "--translation-device",
-        type=int,
-        default=DEFAULT_LOCAL_TRANSLATION_DEVICE,
-        help="Transformers device for in-process translation. Use -1 for CPU, 0 for the first CUDA GPU.",
-    )
-    parser.add_argument(
-        "--translation-max-length",
-        type=int,
-        default=DEFAULT_LOCAL_TRANSLATION_MAX_LENGTH,
-        help=f"Maximum generated translation length. Default: {DEFAULT_LOCAL_TRANSLATION_MAX_LENGTH}.",
-    )
-    parser.add_argument(
-        "--translation-timeout",
-        type=float,
-        default=DEFAULT_TRANSLATION_TIMEOUT_SECONDS,
-        help=f"Translation request timeout in seconds. Default: {DEFAULT_TRANSLATION_TIMEOUT_SECONDS}.",
-    )
-    parser.add_argument("--semantic-model", default=None, help="Local Hugging Face model directory for dense retrieval.")
-    parser.add_argument("--semantic-index", default=str(SCRIPT_DIR / "dataset" / "semantic_index"), help="Dense caption index directory.")
     parser.add_argument("--semantic-device", default="auto", help="Dense retrieval device: auto, cpu, cuda, or cuda:N.")
     parser.add_argument("--semantic-max-length", type=int, default=256)
+    parser.add_argument("--reranker-model", default=None, help="Local cross-encoder model directory used for result reranking.")
+    parser.add_argument("--reranker-device", default="auto", help="Reranker device: auto, cpu, cuda, or cuda:N.")
+    parser.add_argument("--reranker-max-length", type=int, default=128)
+    parser.add_argument("--reranker-batch-size", type=int, default=32)
+    parser.add_argument("--search-prewarm", action="store_true", help="Load semantic and reranker models in the background after startup.")
     return parser
 
 
@@ -2348,15 +2386,15 @@ def main() -> None:
         interx_fps=args.interx_fps,
         converter_env=converter_env,
         conda_exe=args.conda_exe,
-        translation_url=args.translation_url,
-        translation_timeout=args.translation_timeout,
-        translation_model=args.translation_model,
-        translation_device=args.translation_device,
-        translation_max_length=args.translation_max_length,
         semantic_model=args.semantic_model,
         semantic_index=Path(args.semantic_index),
         semantic_device=args.semantic_device,
         semantic_max_length=args.semantic_max_length,
+        reranker_model=args.reranker_model,
+        reranker_device=args.reranker_device,
+        reranker_max_length=args.reranker_max_length,
+        reranker_batch_size=args.reranker_batch_size,
+        search_prewarm=args.search_prewarm,
     )
     example_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     print(
@@ -2375,11 +2413,6 @@ def main() -> None:
                 "interx_fps": args.interx_fps,
                 "entry_count": len(motion_index.entries),
                 "lazy_conversion": True,
-                "translation": {
-                    "external_url": args.translation_url,
-                    "local_model": args.translation_model,
-                    "device": args.translation_device,
-                },
                 "api_root": f"http://{example_host}:{args.port}{API_PREFIX}",
                 "example_search": {
                     "method": "POST",
@@ -2392,6 +2425,8 @@ def main() -> None:
         ),
         flush=True,
     )
+    if server.search_prewarm:
+        threading.Thread(target=server.prewarm_search, name="search-prewarm", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

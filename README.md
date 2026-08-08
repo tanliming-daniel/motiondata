@@ -5,11 +5,11 @@ Multimotion Lazy Retrieval Bundle
 当前支持 InterHuman、InterX 和 Motion-X++。Motion-X++ 使用 `models/smplx/SMPLX_NEUTRAL.npz`，
 首次下载时按需生成带 55 关节骨架和 50 个表情 morph targets 的 GLB。
 
-动作库前端默认使用关键词与 BGE-M3 混合检索。分类目录、列表和缩略图均使用固定索引结果，
+动作库前端默认使用关键词、Qwen3-Embedding 与本地 BGE reranker 的混合检索。分类目录、列表和缩略图均使用固定索引结果，
 重型模型只参与文本查询和按需转换，不参与普通标签跳转。
 
 默认使用方式按中文查询来理解。
-API 现在会优先对短中文关键词直接走 alias，对较长中文描述再在进程内翻成英文，不需要再单独起一个翻译 HTTP 服务。
+Qwen3 直接编码中英文查询；内置 alias 只用于补充中文词法召回，不再加载翻译模型。
 
 ## 你会用到的文件
 
@@ -26,60 +26,63 @@ API 现在会优先对短中文关键词直接走 alias，对较长中文描述�
 - `shell/start_api_server.sh`: 在固定端口 `7091` 启动本地 API。
 - `config/frpc.ini` / `shell/start_api_frp.sh`: 把本地 API 暴露到公网。
 - `requirements/base.txt`: 基础运行依赖说明。
-- `requirements/translation.txt`: 进程内中文翻译依赖。
-- `requirements/semantic.txt`: 向量检索依赖。
+- `requirements/semantic.txt`: Qwen3 向量检索与 BGE 重排依赖。
+- `config/retrieval_eval.jsonl`: 106 条中英文检索质量基线，83 条开发集、23 条固定留出集。
 - `runtime/`: 本地日志、PID 和运行时配置，不提交 Git。
 - `taxonomy/`: 可编辑的分类定义、运行时目录和分类来源。
 - `dataset/`: 动作资产索引及分类、审核、模型等可重建产物。
 - `dataset/motion_index.jsonl`: 当前索引。
-- `dataset/semantic_index/`: 本地生成的语义索引，不提交 Git，可通过构建脚本重建。
+- `dataset/semantic_index_qwen3_06b/`: 本地生成的 Qwen3 语义索引，不提交 Git，可通过构建脚本重建。
 - `/mnt/nas/cy/humanmotion/multimotion_previews/`: 长期保存的 WebP 缩略图。
 
 ## 先理解怎么用
 
 1. 先启动本地 API。
 2. 用中文文字描述去搜结果。
-3. 短中文关键词直接走 alias，较长中文描述才会尝试进程内翻译。
+3. 中文查询由 Qwen3 直接编码，alias 同时补充词法候选。
 4. 需要下载时，再请求 `/api/v1/models/{object_id}`。
 5. 如果要给别的机器用，再起 FRP 公网入口。
 
 ## 安装依赖
 
-基础搜索不需要额外三方依赖。
-如果你想启用“进程内中文翻译”，需要安装：
-
-```bash
-cd /data5/cy/multimotion/server_bundle_lazy
-pip install -r requirements/translation.txt
-```
+纯词法搜索不需要额外三方依赖；Qwen3 语义检索与重排使用 `requirements/semantic.txt`。
 
 ## 启用语义检索
 
-语义检索与三级分类解耦，模型和资产向量均在本机运行。首次准备好本地 `BAAI/bge-m3` 模型目录后，安装依赖并构建一次索引：
+语义检索与三级分类解耦，模型和资产向量均在本机运行。默认使用 `Qwen/Qwen3-Embedding-0.6B` 和 `BAAI/bge-reranker-v2-m3`。先部署模型并构建一次独立索引：
 
 ```bash
+huggingface-cli download Qwen/Qwen3-Embedding-0.6B \
+  --local-dir /data5/cy/models/qwen3-embedding-0.6b
 pip install -r requirements/semantic.txt
 python3 build_motion_index.py --semantic-only \
-  --semantic-model /data5/cy/models/bge-m3 --semantic-device cuda:0
+  --semantic-model /data5/cy/models/qwen3-embedding-0.6b \
+  --semantic-output dataset/semantic_index_qwen3_06b \
+  --semantic-device cuda:3
 ```
 
 启动时显式传入模型和索引目录：
 
 ```bash
 python3 local_motion_query_api.py --host 0.0.0.0 --port 7091 \
-  --semantic-model /data5/cy/models/bge-m3 \
-  --semantic-index dataset/semantic_index --semantic-device cuda:0
+  --semantic-model /data5/cy/models/qwen3-embedding-0.6b \
+  --semantic-index dataset/semantic_index_qwen3_06b --semantic-device cuda:3 \
+  --reranker-model /data5/cy/models/bge-reranker-v2-m3 \
+  --reranker-device cuda:3 --search-prewarm
 ```
 
-搜索接口支持 `lexical`、`semantic` 和 `hybrid` 三种 `retrieval_mode`。旧请求默认仍是关键词检索；动作库页面会使用 `hybrid`。模型或索引不可用时会自动回退到关键词检索，并在 `warnings` 中说明原因。
+搜索接口支持 `lexical`、`semantic` 和 `hybrid` 三种 `retrieval_mode`，默认使用确定性的 `hybrid + rerank + diversity`。重排只处理前 40 个候选，Motion-X++ 的源文件动作名优先于冲突 caption；多样性只降低同系列重复项的排名，不删除结果。可传 `"rerank":false` 或 `"diversity":false` 做对比，也可显式使用 `lexical` 获得最低服务端成本。模型或索引不可用时会自动回退并在 `warnings` 中说明原因。
 
-GPU 模式会以 FP16 加载 BGE-M3，并把 FP16 caption 向量放到同一张 GPU 上计算；FTS 先截取宽松候选，再与向量结果融合。服务会缓存最近 128 个向量查询和最终混合候选，重复查询无需再次推理。模型在服务启动后首次语义查询时延迟加载，长期运行时只承担一次冷启动成本。
+Qwen3 查询会添加动作检索 instruction，中文短动作名还会套用通用的活动语境；caption 不添加 instruction。编码使用 last-token pooling 和 L2 归一化。模型以 BF16 加载，caption 索引保持 FP16，并放到同一张 GPU 上计算。FTS 先截取宽松候选，再与向量结果融合。由于现有 reranker 和后续多样性排序会损害中文查询对英文 caption 的排序，CJK 查询保留 Qwen 混合排序，英文查询继续使用 reranker 和多样性。服务缓存向量查询、混合候选和重排分数，重复查询无需再次推理。索引 manifest 固定记录 Qwen 编码契约，旧 BGE/CLS 索引会被拒绝并提示重建；模型或索引缺失时服务仍可启动并回退到词法检索。
 
-默认使用的本地翻译模型路径是：
+检索评测报告写入已忽略的 `runtime/`，配置集长期保留，便于迭代前后使用同一口径比较：
 
-```text
-/data5/cy/animodata/server_bundle_full/opus-mt-zh-en
+```bash
+python3 query_api_client.py --eval-file config/retrieval_eval.jsonl \
+  --split all --report runtime/retrieval_eval_report.json
 ```
+
+报告包含 Hit@5、MRR@10、nDCG@10、Recall@50、前十重复率、禁止命中数和 p50/p95 延迟，并按语言和查询类型分别汇总。相关资产 ID 和系列规则可直接编辑，留出集不要参与参数选择。
 
 ## 本地启动
 
@@ -97,16 +100,12 @@ cd /data5/cy/multimotion/server_bundle_lazy
 python3 local_motion_query_api.py --host 0.0.0.0 --port 7091
 ```
 
-如果你想显式指定翻译模型或设备：
-
-```bash
-python3 local_motion_query_api.py   --host 0.0.0.0   --port 7091   --translation-model /data5/cy/animodata/server_bundle_full/opus-mt-zh-en   --translation-device 0
-```
-
 CPU 启动方式：
 
 ```bash
-python3 local_motion_query_api.py   --host 0.0.0.0   --port 7091   --translation-device -1
+python3 local_motion_query_api.py --host 0.0.0.0 --port 7091 \
+  --semantic-model /data5/cy/models/qwen3-embedding-0.6b \
+  --semantic-index dataset/semantic_index_qwen3_06b --semantic-device cpu
 ```
 
 检查健康状态：
@@ -134,7 +133,7 @@ http://127.0.0.1:7091/ui/action-taxonomy
 
 ```bash
 python3 build_taxonomy_assignments.py --stage all \
-  --classifier hybrid --device cuda:3 --translation-device cuda:0
+  --classifier hybrid --device cuda:3
 ```
 
 三级模型会为每条资产发布一个唯一的三级叶子标签，旧规则只作为轻量先验，不再锁定最终分类。低置信、规则冲突和分层抽样结果写入 `dataset/motion_taxonomy_review.jsonl`。“待复核”只是第一候选得分或与第二候选差距较低的提示，不表示资产未分类，也不影响文本检索。
@@ -148,8 +147,7 @@ python3 build_taxonomy_assignments.py --stage all \
 curl -X POST http://127.0.0.1:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"握手","top_k":3}'
 ```
 
-默认会启用轻微随机性，在高分候选里按分数加权抽样。泛化查询例如“走路”不会每次固定返回同几个结果。
-如果需要完全固定排序，可以传 `"randomness":0`：
+默认 `randomness=0`，相同索引和参数会返回固定排序。需要探索性结果时可以显式提高随机性：
 
 ```bash
 curl -X POST http://127.0.0.1:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"走路","top_k":3,"randomness":0}'
@@ -193,7 +191,7 @@ curl -L "http://127.0.0.1:7091/api/v1/models/84c0814294c64ce3321271ee3b9fdb13657
 python3 query_api_client.py --base-url http://127.0.0.1:7091 --text "握手" --top-k 3 --skip-download-models
 ```
 
-客户端默认不传 `randomness`，使用服务端默认随机性。需要固定结果时加 `--randomness 0`；需要可复现随机结果时加 `--randomness 0.25 --random-seed demo`。
+客户端默认使用服务端的确定性混合检索。需要探索性结果时加 `--randomness 0.25 --random-seed demo`。
 
 搜索并下载 top-k 模型：
 
@@ -211,10 +209,10 @@ python3 query_api_client.py --base-url http://127.0.0.1:7091 --text "两个人�
 
 ## 中文查询说明
 
-这个 bundle 现在有两层中文处理：
+这个 bundle 的中文查询有两层处理：
 
-1. 内置中文 alias 词表（短关键词优先走这个，速度最快）
-2. 进程内本地翻译模型（较长中文描述再走这个）
+1. Qwen3-Embedding 直接编码完整中文查询，负责语义召回。
+2. 内置中文 alias 词表补充英文关键词，负责词法召回。
 
 常见动作词可以直接搜，例如：
 
@@ -226,15 +224,7 @@ python3 query_api_client.py --base-url http://127.0.0.1:7091 --text "两个人�
 - `拉`
 - `挥手`
 
-如果本地翻译模型没装依赖，或者模型不可用，API 会继续只用 alias 模式工作。
-
-如果你已经有现成的外部中文翻译接口，也仍然可以在启动 API 时加上：
-
-```bash
-python3 local_motion_query_api.py   --host 0.0.0.0   --port 7091   --translation-url http://127.0.0.1:7099/translate
-```
-
-外部翻译现在只是可选回退，不再是默认路径。
+Qwen 模型或索引不可用时，API 会继续使用 alias 和 FTS 词法检索，并在响应 `warnings` 中说明回退原因。
 
 ## 公网访问
 
@@ -277,7 +267,7 @@ curl http://42.193.117.211:7091/api/v1/health
 curl -X POST http://42.193.117.211:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"握手","top_k":3}'
 ```
 
-公网接口同样默认启用轻微随机性；固定结果可在 JSON 里加 `"randomness":0`。
+公网接口同样默认使用确定性排序；探索性结果可在 JSON 里显式提高 `randomness`。
 
 如果你想直接用客户端：
 
@@ -308,8 +298,7 @@ curl -L "http://42.193.117.211:7091/api/v1/models/84c0814294c64ce3321271ee3b9fdb
 - 公网连不上：查看 `runtime/frpc.log`，再确认 `shell/start_api_frp.sh` 是否在运行。
 - 第一次下载慢：这是正常的，服务端会先把对应 motion 转成 GLB。
 - 下载后找不到文件：去看 `client_output/`。
-- 中文搜不到：先把描述缩短成关键词，例如把“其中一个人和另一个人轻轻握手”改成“握手”。
-- 中文翻译不工作：先确认已经安装 `requirements/translation.txt` 里的依赖，并且本地模型路径存在。
+- Qwen 搜索回退：检查 Qwen 模型目录、`dataset/semantic_index_qwen3_06b/manifest.json` 和健康接口中的语义检索状态。
 
 ## 重新生成索引
 
@@ -317,8 +306,11 @@ curl -L "http://42.193.117.211:7091/api/v1/models/84c0814294c64ce3321271ee3b9fdb
 
 ```bash
 cd /data5/cy/multimotion/server_bundle_lazy
+python3 build_motion_index.py --semantic-only \
+  --semantic-model /data5/cy/models/qwen3-embedding-0.6b \
+  --semantic-output dataset/semantic_index_qwen3_06b --semantic-device cuda:3
 python3 build_taxonomy_assignments.py --stage model \
-  --device cuda:3 --translation-device cuda:0
+  --model /data5/cy/models/qwen3-embedding-0.6b --device cuda:3
 python3 build_taxonomy_assignments.py --classifier hybrid --device cuda:3
 ```
 
@@ -329,7 +321,7 @@ python3 build_taxonomy_assignments.py --classifier hybrid --device cuda:3
 - `dataset/motion_taxonomy_review.jsonl`: 低置信及规则冲突候选审核队列。
 - `dataset/taxonomy_model/`: 可重建的本地标签模型索引。
 
-分类过程离线复用 BGE-M3 caption 向量，按三级动作、二级动作组和一级领域进行层级语义评分。所有资产固定归入一个三级叶子；置信度不足时仍发布该标签，同时标记为待复核。
+分类过程离线复用 Qwen3 caption 向量，直接编码中英双语分类原型，按三级动作、二级动作组和一级领域进行层级语义评分。所有资产固定归入一个三级叶子；置信度不足时仍发布该标签，同时标记为待复核。
 
 全量生成静态缩略图：
 

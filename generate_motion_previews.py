@@ -4,12 +4,13 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+import importlib
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
-from typing import Any
+from typing import Any, Sequence, cast
 from urllib.parse import quote
 
 from PIL import Image
@@ -63,7 +64,6 @@ def temporary_server(index: local_motion_query_api.MotionIndex, args: argparse.N
         interx_fps=local_motion_query_api.DEFAULT_INTERX_FPS,
         converter_env=local_motion_query_api.normalize_whitespace(args.converter_env) or None,
         conda_exe=args.conda_exe,
-        translation_model="none",
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -98,8 +98,12 @@ def validate_preview_file(
             if expected_height is not None and image.height != expected_height:
                 return "wrong_dimensions"
             sample = image.convert("RGB").resize(PREVIEW_SAMPLE_SIZE)
-            channel_range = max(high - low for low, high in sample.getextrema())
-            pixels = list(sample.getdata())
+            extrema = cast(
+                tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
+                sample.getextrema(),
+            )
+            channel_range = max(high - low for low, high in extrema)
+            pixels = cast(Sequence[tuple[int, int, int]], sample.getdata())
             corner_pixels = [pixels[0], pixels[PREVIEW_SAMPLE_SIZE[0] - 1], pixels[-PREVIEW_SAMPLE_SIZE[0]], pixels[-1]]
             background = tuple(sorted(pixel[channel] for pixel in corner_pixels)[len(corner_pixels) // 2] for channel in range(3))
             foreground_ratio = sum(
@@ -325,7 +329,7 @@ def main() -> int:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
 
-    from playwright.sync_api import sync_playwright
+    sync_playwright = importlib.import_module("playwright.sync_api").sync_playwright
 
     with temporary_server(index, args) as base_url:
         with sync_playwright() as p:

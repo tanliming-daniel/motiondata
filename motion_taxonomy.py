@@ -472,6 +472,9 @@ class TaxonomyClassifier:
         self.semantic_index_dir = semantic_index_dir.expanduser().resolve()
         self.device = device
         self.manifest = json.loads((self.model_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.semantic_manifest = json.loads(
+            (self.semantic_index_dir / "manifest.json").read_text(encoding="utf-8")
+        )
         with (self.model_dir / "labels.jsonl").open("r", encoding="utf-8") as handle:
             self.labels = [json.loads(line) for line in handle if line.strip()]
         self.label_embeddings = np.load(self.model_dir / "label_embeddings.npy", mmap_mode="r")
@@ -483,6 +486,26 @@ class TaxonomyClassifier:
         self._validate_model()
 
     def _validate_model(self) -> None:
+        expected_contract = {
+            "encoder_family": "qwen3-embedding",
+            "pooling": "last_token",
+            "normalized": True,
+        }
+        for field, value in expected_contract.items():
+            if self.manifest.get(field) != value:
+                raise ValueError(
+                    f"taxonomy model {field} mismatch: expected {value!r}, "
+                    f"got {self.manifest.get(field)!r}; rebuild the Qwen3 taxonomy model"
+                )
+            if self.semantic_manifest.get(field) != value:
+                raise ValueError(
+                    f"semantic index {field} mismatch: expected {value!r}, "
+                    f"got {self.semantic_manifest.get(field)!r}; rebuild the Qwen3 semantic index"
+                )
+        if self.manifest.get("encoding_role") != "document":
+            raise ValueError("taxonomy model must contain Qwen3 document embeddings")
+        if self.manifest.get("model_config_sha256") != self.semantic_manifest.get("model_config_sha256"):
+            raise ValueError("taxonomy model and semantic index use different Qwen3 model configs")
         if self.label_embeddings.shape != (len(self.labels), int(self.manifest["dimension"])):
             raise ValueError("taxonomy label index shape does not match its manifest")
         if len(self.caption_rows) != self.caption_embeddings.shape[0]:

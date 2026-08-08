@@ -24,9 +24,8 @@ DEFAULT_OUTPUT = SCRIPT_DIR / "dataset" / "motion_taxonomy_assignments.jsonl"
 DEFAULT_REPORT = SCRIPT_DIR / "dataset" / "motion_taxonomy_report.json"
 DEFAULT_REVIEW = SCRIPT_DIR / "dataset" / "motion_taxonomy_review.jsonl"
 DEFAULT_TAXONOMY_MODEL = SCRIPT_DIR / "dataset" / "taxonomy_model"
-DEFAULT_SEMANTIC_INDEX = SCRIPT_DIR / "dataset" / "semantic_index"
-DEFAULT_MODEL = "/data5/cy/models/bge-m3"
-DEFAULT_TRANSLATION_MODEL = "/data5/cy/animodata/server_bundle_full/opus-mt-zh-en"
+DEFAULT_SEMANTIC_INDEX = SCRIPT_DIR / "dataset" / "semantic_index_qwen3_06b"
+DEFAULT_MODEL = "/data5/cy/models/qwen3-embedding-0.6b"
 CATALOG_PATH = SCRIPT_DIR / "taxonomy" / "catalog.json"
 TAXONOMY_SOURCE_PATH = SCRIPT_DIR / "taxonomy" / "action_asset_source.json"
 
@@ -425,74 +424,36 @@ def prototype_zh(node: dict[str, Any]) -> str:
     return text
 
 
-def hierarchy_prototypes(node: dict[str, Any], translations: dict[str, str]) -> tuple[str, str, str]:
+def hierarchy_prototypes(node: dict[str, Any]) -> tuple[str, str, str]:
     path = node_path(node)
-    translated_path = [translations.get(str(item["zh_cn"]), "") for item in path]
     aliases_en = list(dict.fromkeys(str(value) for value in node.get("aliases_en", []) if value))
-    leaf_english = (
-        f"Action: {translated_path[-1]}. "
-        f"Category: {translated_path[-2]}. Domain: {translated_path[0]}."
-    )
-    if aliases_en:
-        leaf_english += f" Similar actions: {', '.join(aliases_en)}."
     chinese = prototype_zh(node)
-    leaf = f"{leaf_english} Chinese taxonomy: {chinese}"
-    group = (
-        f"Action category: {translated_path[-2]}. Domain: {translated_path[0]}. "
-        f"动作类别：{path[-2]['zh_cn']}。所属领域：{path[0]['zh_cn']}。"
-    )
-    major = f"Action domain: {translated_path[0]}. 动作领域：{path[0]['zh_cn']}。"
+    aliases = f" English aliases: {', '.join(aliases_en)}." if aliases_en else ""
+    leaf = f"{chinese}{aliases}"
+    group = f"动作类别：{path[-2]['zh_cn']}。所属领域：{path[0]['zh_cn']}。"
+    major = f"动作领域：{path[0]['zh_cn']}。"
     return leaf, group, major
-
-
-def translate_texts(texts: list[str], model_path: str, device: str, batch_size: int) -> list[str]:
-    import torch
-    from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
-
-    model = AutoModelForSeq2SeqLM.from_config(AutoConfig.from_pretrained(model_path))
-    state = torch.load(Path(model_path) / "pytorch_model.bin", map_location="cpu", weights_only=True)
-    model.load_state_dict(state, strict=False)
-    model.to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    translated: list[str] = []
-    for start in range(0, len(texts), max(batch_size, 1)):
-        batch = texts[start : start + max(batch_size, 1)]
-        encoded = tokenizer(batch, padding=True, truncation=True, return_tensors="pt")
-        encoded = {key: value.to(device) for key, value in encoded.items()}
-        with torch.inference_mode():
-            generated = model.generate(**encoded, max_new_tokens=96)
-        translated.extend(tokenizer.batch_decode(generated, skip_special_tokens=True))
-        print(f"translated labels {min(start + len(batch), len(texts))}/{len(texts)}", flush=True)
-    return translated
 
 
 def build_taxonomy_model(args: argparse.Namespace) -> dict[str, Any]:
     nodes = visible_action_nodes()
-    unique_labels = list(dict.fromkeys(
-        str(item["zh_cn"]) for node in nodes for item in node_path(node)
-    ))
-    translated_labels = (
-        ["" for _ in unique_labels]
-        if args.no_translation
-        else translate_texts(unique_labels, args.translation_model, args.translation_device, args.batch_size)
-    )
-    translations = dict(zip(unique_labels, translated_labels))
     rows: list[dict[str, Any]] = []
     for index, node in enumerate(nodes):
-        leaf, group, major = hierarchy_prototypes(node, translations)
+        leaf, group, major = hierarchy_prototypes(node)
         rows.append({
             "index": index, "node_id": node["id"], "parent_id": node.get("parent_id"),
-            "label": node["zh_cn"], "label_en": translations.get(str(node["zh_cn"]), ""),
+            "label": node["zh_cn"],
             "prototype_zh": prototype_zh(node), "prototype": leaf,
             "group_prototype": group, "major_prototype": major,
         })
-    encoder = SemanticRetriever(args.taxonomy_model, args.model, args.device)
+    encoder = SemanticRetriever(args.taxonomy_model, args.model, args.device, load_index=False)
+    assert encoder.encoder_profile is not None
 
     def encode_field(field: str) -> np.ndarray:
         vectors: list[np.ndarray] = []
         for start in range(0, len(rows), max(args.batch_size, 1)):
             batch = rows[start : start + max(args.batch_size, 1)]
-            vectors.append(encoder.encode([str(row[field]) for row in batch]))
+            vectors.append(encoder.encode_documents([str(row[field]) for row in batch]))
             print(
                 f"encoded {field} {min(start + len(batch), len(rows))}/{len(rows)}",
                 flush=True,
@@ -502,14 +463,21 @@ def build_taxonomy_model(args: argparse.Namespace) -> dict[str, Any]:
     leaf_embeddings = encode_field("prototype")
     group_embeddings = encode_field("group_prototype")
     major_embeddings = encode_field("major_prototype")
+    model_config_path = Path(args.model).expanduser() / "config.json"
     manifest = {
         "model": args.model,
+        "model_config_sha256": (
+            hashlib.sha256(model_config_path.read_bytes()).hexdigest()
+            if model_config_path.is_file()
+            else None
+        ),
         "taxonomy_version": motion_taxonomy.taxonomy_payload()["version"],
         "catalog_sha256": hashlib.sha256(CATALOG_PATH.read_bytes()).hexdigest(),
         "classification_method": "semantic_leaf_v2",
         "count": len(rows), "dimension": int(leaf_embeddings.shape[1]), "dtype": "float16",
-        "normalized": True, "pooling": "cls",
-        "translation_model": None if args.no_translation else args.translation_model,
+        "normalized": True, "pooling": encoder.encoder_profile.pooling,
+        "encoder_family": encoder.encoder_profile.family,
+        "encoding_role": "document",
         "score_weights": {"leaf": 0.7, "group": 0.2, "major": 0.1},
         "rule_prior_bonus": 0.015,
     }
@@ -557,9 +525,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda:3")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--translation-model", default=DEFAULT_TRANSLATION_MODEL)
-    parser.add_argument("--translation-device", default="cuda:0")
-    parser.add_argument("--no-translation", action="store_true")
     return parser
 
 
