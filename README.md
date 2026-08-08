@@ -71,7 +71,7 @@ python3 local_motion_query_api.py --host 0.0.0.0 --port 7091 \
   --reranker-device cuda:3 --search-prewarm
 ```
 
-搜索接口支持 `lexical`、`semantic` 和 `hybrid` 三种 `retrieval_mode`，默认使用确定性的 `hybrid + rerank + diversity`。重排只处理前 40 个候选，Motion-X++ 的源文件动作名优先于冲突 caption；多样性只降低同系列重复项的排名，不删除结果。可传 `"rerank":false` 或 `"diversity":false` 做对比，也可显式使用 `lexical` 获得最低服务端成本。模型或索引不可用时会自动回退并在 `warnings` 中说明原因。
+搜索接口支持 `lexical`、`semantic` 和 `hybrid` 三种 `retrieval_mode`，默认使用确定性的 `hybrid + rerank + diversity`。重排只处理前 20 个候选，Motion-X++ 的源文件动作名优先于冲突 caption；多样性只降低同系列重复项的排名，不删除结果。可传 `"rerank":false` 或 `"diversity":false` 做对比，也可显式使用 `lexical` 获得最低服务端成本。模型或索引不可用时会自动回退并在 `warnings` 中说明原因。
 
 Qwen3 查询会添加动作检索 instruction，中文短动作名还会套用通用的活动语境；caption 不添加 instruction。编码使用 last-token pooling 和 L2 归一化。模型以 BF16 加载，caption 索引保持 FP16，并放到同一张 GPU 上计算。FTS 先截取宽松候选，再与向量结果融合。由于现有 reranker 和后续多样性排序会损害中文查询对英文 caption 的排序，CJK 查询保留 Qwen 混合排序，英文查询继续使用 reranker 和多样性。服务缓存向量查询、混合候选和重排分数，重复查询无需再次推理。索引 manifest 固定记录 Qwen 编码契约，旧 BGE/CLS 索引会被拒绝并提示重建；模型或索引缺失时服务仍可启动并回退到词法检索。
 

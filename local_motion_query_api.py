@@ -69,9 +69,9 @@ FACET_CACHE_SIZE = 128
 API_PREFIX = "/api/v1"
 OPENAPI_PATH = "/openapi.json"
 LOCAL_ENCODER_NAME = "local_motion_lexical_bm25_v1"
-HYBRID_ENCODER_NAME = "local_motion_hybrid_rerank_v2"
+HYBRID_ENCODER_NAME = "local_motion_hybrid_rerank_v3"
 DEFAULT_SEARCH_RANDOMNESS = 0.0
-DEFAULT_RERANK_CANDIDATES = 40
+DEFAULT_RERANK_CANDIDATES = 20
 MODEL_CONTENT_TYPE = "model/gltf-binary"
 
 
