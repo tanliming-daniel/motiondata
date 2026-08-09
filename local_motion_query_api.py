@@ -59,8 +59,13 @@ DEFAULT_MODEL_DIR = MULTIMOTION_DIR / "models" / "smplh"
 DEFAULT_SMPLX_MODEL_DIR = MULTIMOTION_DIR / "models" / "smplx"
 DEFAULT_CONVERTER_ENV = "sam2dam2"
 DEFAULT_CONDA_EXE = "conda"
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 7091
+DEFAULT_SEMANTIC_MODEL = "/data5/cy/models/qwen3-embedding-0.6b"
+DEFAULT_SEMANTIC_INDEX = "/data5/cy/multimotion/server_bundle_lazy/dataset/semantic_index_qwen3_06b"
+DEFAULT_SEMANTIC_DEVICE = "cuda:3"
+DEFAULT_RERANKER_MODEL = "/data5/cy/models/bge-reranker-v2-m3"
+DEFAULT_RERANKER_DEVICE = "cuda:3"
 DEFAULT_FRAME_STEP = 1
 DEFAULT_INTERX_FPS = 30.0
 DEFAULT_PAGE_SIZE = 20
@@ -2349,19 +2354,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interx-fps", type=float, default=DEFAULT_INTERX_FPS, help="Frame rate used for InterX GLB export.")
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"Bind host. Default: {DEFAULT_HOST}")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Bind port. Default: {DEFAULT_PORT}")
-    parser.add_argument("--semantic-model", default=None, help="Local Qwen3-Embedding model directory.")
+    parser.add_argument("--semantic-model", default=DEFAULT_SEMANTIC_MODEL, help="Local Qwen3-Embedding model directory.")
     parser.add_argument(
         "--semantic-index",
-        default=str(SCRIPT_DIR / "dataset" / "semantic_index_qwen3_06b"),
+        default=DEFAULT_SEMANTIC_INDEX,
         help="Qwen3 caption index directory.",
     )
-    parser.add_argument("--semantic-device", default="auto", help="Dense retrieval device: auto, cpu, cuda, or cuda:N.")
+    parser.add_argument("--semantic-device", default=DEFAULT_SEMANTIC_DEVICE, help="Dense retrieval device: auto, cpu, cuda, or cuda:N.")
     parser.add_argument("--semantic-max-length", type=int, default=256)
-    parser.add_argument("--reranker-model", default=None, help="Local cross-encoder model directory used for result reranking.")
-    parser.add_argument("--reranker-device", default="auto", help="Reranker device: auto, cpu, cuda, or cuda:N.")
+    parser.add_argument("--reranker-model", default=DEFAULT_RERANKER_MODEL, help="Local cross-encoder model directory used for result reranking.")
+    parser.add_argument("--reranker-device", default=DEFAULT_RERANKER_DEVICE, help="Reranker device: auto, cpu, cuda, or cuda:N.")
     parser.add_argument("--reranker-max-length", type=int, default=128)
     parser.add_argument("--reranker-batch-size", type=int, default=32)
-    parser.add_argument("--search-prewarm", action="store_true", help="Load semantic and reranker models in the background after startup.")
+    parser.add_argument(
+        "--search-prewarm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Load semantic and reranker models in the background after startup.",
+    )
     return parser
 
 

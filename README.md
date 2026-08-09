@@ -97,7 +97,7 @@ bash shell/start_api_server.sh
 
 ```bash
 cd /data5/cy/multimotion/server_bundle_lazy
-python3 local_motion_query_api.py --host 0.0.0.0 --port 7091
+python3 local_motion_query_api.py --port 7091
 ```
 
 CPU 启动方式：
