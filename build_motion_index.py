@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pickle
+import re
 from dataclasses import dataclass
 from pathlib import Path
 import struct
@@ -32,6 +33,9 @@ DEFAULT_CACHE_ROOT = Path("cache") / "models"
 DEFAULT_INTERHUMAN_ROOT = Path("/mnt/nas/cy/humanmotion/interhuman")
 DEFAULT_INTERX_ROOT = Path("/mnt/nas/cy/humanmotion/interx")
 DEFAULT_MOTIONXPP_ROOT = Path("/mnt/nas/cy/humanmotion/motionx++")
+DEFAULT_MOTIONLAB_ROOT = Path(
+    "/data5/cy/WorldModel/story2world_bundle_20260623_014225/PersonGen/assets/motionlab_glb_v3"
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,13 @@ class MotionIndexRecord:
 
 def normalize_whitespace(text: str) -> str:
     return " ".join(text.strip().split())
+
+
+def glb_stem_to_description(stem: str) -> str:
+    text = stem.replace("_", " ")
+    text = re.sub(r"\s+([.,:;])", r"\1", text)
+    text = re.sub(r"([-/])", r" \1 ", text)
+    return normalize_whitespace(text)
 
 
 def read_captions(path: Path) -> tuple[str, ...]:
@@ -100,6 +111,46 @@ def read_npy_frame_count(path: Path) -> int | None:
         shape = header.get("shape") if isinstance(header, dict) else None
         return int(shape[0]) if isinstance(shape, tuple) and shape and int(shape[0]) > 0 else None
     except (OSError, UnicodeDecodeError, ValueError, SyntaxError, struct.error):
+        return None
+
+
+def read_glb_frame_count(path: Path) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            if handle.read(4) != b"glTF":
+                return None
+            version, total_length = struct.unpack("<II", handle.read(8))
+            if version != 2 or total_length < 20:
+                return None
+            while handle.tell() + 8 <= total_length:
+                chunk_length, chunk_type = struct.unpack("<I4s", handle.read(8))
+                chunk = handle.read(chunk_length)
+                if chunk_type != b"JSON":
+                    continue
+                gltf = json.loads(chunk.rstrip(b" \t\r\n\x00").decode("utf-8"))
+                accessors = gltf.get("accessors") if isinstance(gltf, dict) else None
+                animations = gltf.get("animations") if isinstance(gltf, dict) else None
+                if not isinstance(accessors, list) or not isinstance(animations, list):
+                    return None
+                counts: list[int] = []
+                for animation in animations:
+                    if not isinstance(animation, dict):
+                        continue
+                    for sampler in animation.get("samplers") or ():
+                        if not isinstance(sampler, dict):
+                            continue
+                        input_index = sampler.get("input")
+                        if not isinstance(input_index, int) or input_index < 0 or input_index >= len(accessors):
+                            continue
+                        accessor = accessors[input_index]
+                        if not isinstance(accessor, dict):
+                            continue
+                        count = int(accessor.get("count") or 0)
+                        if count > 0:
+                            counts.append(count)
+                return max(counts) if counts else None
+        return None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, struct.error, ValueError, TypeError):
         return None
 
 
@@ -235,6 +286,35 @@ def build_motionxpp_records(root: Path, cache_root: Path) -> tuple[list[MotionIn
     return records, warnings
 
 
+def build_motionlab_records(root: Path, cache_root: Path) -> tuple[list[MotionIndexRecord], list[str]]:
+    records: list[MotionIndexRecord] = []
+    warnings: list[str] = []
+    manifest = root / "fbx_to_glb_manifest_parallel.jsonl"
+    caption_file = manifest if manifest.is_file() else root
+
+    for motion_path in sorted(root.glob("*.glb")):
+        motion_id = motion_path.stem
+        description = glb_stem_to_description(motion_id)
+        if not description:
+            warnings.append(f"motionlab/{motion_id}: empty generated description")
+            continue
+        source_motion = motion_path.resolve()
+        records.append(
+            MotionIndexRecord(
+                dataset="motionlab",
+                motion_id=motion_id,
+                source_motion=source_motion,
+                caption_file=caption_file.resolve(),
+                captions=(description,),
+                description=description,
+                object_id=build_object_id("motionlab", motion_id, source_motion),
+                cache_glb=source_motion,
+                frame_count=read_glb_frame_count(source_motion),
+            )
+        )
+    return records, warnings
+
+
 def semantic_source_rows(index_path: Path) -> list[dict[str, str | int]]:
     rows: list[dict[str, str | int]] = []
     with index_path.open("r", encoding="utf-8") as handle:
@@ -341,6 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interhuman-root", type=Path, default=DEFAULT_INTERHUMAN_ROOT)
     parser.add_argument("--interx-root", type=Path, default=DEFAULT_INTERX_ROOT)
     parser.add_argument("--motionxpp-root", type=Path, default=DEFAULT_MOTIONXPP_ROOT)
+    parser.add_argument("--motionlab-root", type=Path, default=DEFAULT_MOTIONLAB_ROOT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument(
         "--cache-root",
@@ -350,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset",
-        choices=("all", "interhuman", "interx", "motionxpp"),
+        choices=("all", "interhuman", "interx", "motionxpp", "motionlab"),
         default="all",
         help="Dataset subset to index.",
     )
@@ -411,6 +492,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         else:
             warnings.append(f"motionxpp root does not exist: {args.motionxpp_root}")
 
+    if args.dataset in {"all", "motionlab"}:
+        if args.motionlab_root.is_dir():
+            dataset_records, dataset_warnings = build_motionlab_records(args.motionlab_root, args.cache_root)
+            records.extend(dataset_records)
+            warnings.extend(dataset_warnings)
+        else:
+            warnings.append(f"motionlab root does not exist: {args.motionlab_root}")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
         for record in records:
@@ -424,6 +513,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "interhuman": sum(1 for record in records if record.dataset == "interhuman"),
             "interx": sum(1 for record in records if record.dataset == "interx"),
             "motionxpp": sum(1 for record in records if record.dataset == "motionxpp"),
+            "motionlab": sum(1 for record in records if record.dataset == "motionlab"),
         },
         "warning_count": len(warnings),
         "warnings": warnings[: max(args.max_warnings, 0)],

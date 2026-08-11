@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--converter-env", default=local_motion_query_api.DEFAULT_CONVERTER_ENV)
     parser.add_argument("--conda-exe", default=local_motion_query_api.DEFAULT_CONDA_EXE)
     parser.add_argument("--limit", type=int, default=0, help="Maximum previews to generate; 0 means no limit.")
-    parser.add_argument("--dataset", choices=("all", "interhuman", "interx", "motionxpp"), default="all")
+    parser.add_argument("--dataset", choices=("all", "interhuman", "interx", "motionxpp", "motionlab"), default="all")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--width", type=int, default=384)
     parser.add_argument("--height", type=int, default=240)
@@ -257,28 +257,37 @@ def candidate_entries(index: local_motion_query_api.MotionIndex, args: argparse.
 
 def render_preview(page: Any, base_url: str, entry: local_motion_query_api.MotionEntry, output_path: Path, width: int, height: int, quality: int) -> None:
     model_url = f"{base_url}/api/v1/models/{quote(entry.object_id)}"
-    render_url = f"{base_url}/ui/static/preview_renderer.html?model={quote(model_url, safe=':/?&=%')}&width={width}&height={height}"
-    page.goto(render_url, wait_until="networkidle", timeout=300000)
-    page.wait_for_function("window.__PREVIEW_STATUS__ === 'ready' || window.__PREVIEW_STATUS__ === 'failed'", timeout=300000)
-    status = page.evaluate("window.__PREVIEW_STATUS__")
-    if status != "ready":
-        message = page.evaluate("window.__PREVIEW_ERROR__")
-        raise RuntimeError(message or "renderer failed")
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
-        temporary_png = Path(handle.name)
-    try:
-        page.locator("canvas").screenshot(path=str(temporary_png))
-        with Image.open(temporary_png) as image:
-            save_webp_atomically(
-                image,
-                output_path,
-                quality=quality,
-                expected_width=width,
-                expected_height=height,
-            )
-        output_path.with_suffix(output_path.suffix + ".canonical-v2").write_text("canonical-v2\n", encoding="ascii")
-    finally:
-        temporary_png.unlink(missing_ok=True)
+    last_blank_error: RuntimeError | None = None
+    for attempt in range(2):
+        render_url = f"{base_url}/ui/static/preview_renderer.html?model={quote(model_url, safe=':/?&=%')}&width={width}&height={height}&sample=0.5&v=canonical-v5&attempt={attempt}"
+        page.goto(render_url, wait_until="networkidle", timeout=300000)
+        page.wait_for_function("window.__PREVIEW_STATUS__ === 'ready' || window.__PREVIEW_STATUS__ === 'failed'", timeout=300000)
+        status = page.evaluate("window.__PREVIEW_STATUS__")
+        if status != "ready":
+            message = page.evaluate("window.__PREVIEW_ERROR__")
+            raise RuntimeError(message or "renderer failed")
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            temporary_png = Path(handle.name)
+        try:
+            page.locator("canvas").screenshot(path=str(temporary_png))
+            with Image.open(temporary_png) as image:
+                save_webp_atomically(
+                    image,
+                    output_path,
+                    quality=quality,
+                    expected_width=width,
+                    expected_height=height,
+                )
+            output_path.with_suffix(output_path.suffix + ".canonical-v2").write_text("canonical-v2\n", encoding="ascii")
+            return
+        except RuntimeError as exc:
+            if "Generated preview failed validation: blank" not in str(exc) or attempt:
+                raise
+            last_blank_error = exc
+        finally:
+            temporary_png.unlink(missing_ok=True)
+    if last_blank_error:
+        raise last_blank_error
 
 
 def main() -> int:

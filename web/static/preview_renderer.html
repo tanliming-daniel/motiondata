@@ -7,6 +7,7 @@ const params = new URLSearchParams(location.search);
 const modelUrl = params.get('model');
 const width = Number(params.get('width') || 512);
 const height = Number(params.get('height') || 320);
+const sample = Math.min(Math.max(Number(params.get('sample') || 0.5), 0), 1);
 const root = document.getElementById('root');
 root.style.width = `${width}px`;
 root.style.height = `${height}px`;
@@ -52,13 +53,16 @@ function fitObjectCamera(object, camera, padding = 1.56, fixedFront = false) {
     camera.updateProjectionMatrix();
     return;
   }
+  const size = box.getSize(new THREE.Vector3());
   const sphere = box.getBoundingSphere(new THREE.Sphere());
   const center = sphere.center;
   const radius = Math.max(sphere.radius, 1.0);
   const fov = THREE.MathUtils.degToRad(camera.fov);
   const distance = (radius / Math.sin(fov / 2)) * padding;
-  camera.position.set(center.x + radius * 0.28, center.y + radius * 1.38, center.z + distance);
-  camera.lookAt(center.x, center.y + radius * 0.56, center.z);
+  const targetY = box.min.y + size.y * 0.5;
+  const elevation = Math.max(size.y * 0.8, radius * 0.22);
+  camera.position.set(center.x + radius * 0.28, targetY + elevation, center.z + distance);
+  camera.lookAt(center.x, targetY, center.z);
   camera.near = Math.max(distance / 200, 0.01);
   camera.far = Math.max(distance * 8, 80);
   camera.updateProjectionMatrix();
@@ -67,7 +71,7 @@ function fitObjectCamera(object, camera, padding = 1.56, fixedFront = false) {
 function middleAnimationTime(gltf) {
   if (!gltf.animations || !gltf.animations.length) return 0;
   const duration = Math.max(...gltf.animations.map((clip) => Number(clip.duration || 0)));
-  return duration > 0 ? duration * 0.5 : 0;
+  return duration > 0 ? duration * sample : 0;
 }
 
 const scene = new THREE.Scene();
@@ -91,9 +95,17 @@ new GLTFLoader().load(modelUrl, (gltf) => {
     mixer.update(0);
   }
   const dataset = String(gltf.parser?.json?.extras?.dataset || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  fitObjectCamera(gltf.scene, camera, 1.56, dataset === "motionx" || dataset === "motionxpp");
-  renderer.render(scene, camera);
-  window.__PREVIEW_STATUS__ = 'ready';
+  fitObjectCamera(gltf.scene, camera, 1.32, dataset === "motionx" || dataset === "motionxpp");
+  const renderReadyFrame = () => {
+    renderer.render(scene, camera);
+    requestAnimationFrame(() => {
+      gltf.scene.updateMatrixWorld(true);
+      gltf.scene.traverse((child) => { if (child.isSkinnedMesh) child.skeleton.update(); });
+      renderer.render(scene, camera);
+      window.__PREVIEW_STATUS__ = 'ready';
+    });
+  };
+  requestAnimationFrame(renderReadyFrame);
 }, undefined, (error) => {
   window.__PREVIEW_ERROR__ = String(error && error.message ? error.message : error);
   window.__PREVIEW_STATUS__ = 'failed';

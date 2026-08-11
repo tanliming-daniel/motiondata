@@ -194,8 +194,40 @@ TOKEN_ALIASES = {
     "跑步": "run",
     "跳": "jump",
     "跳跃": "jump",
-    "击掌": "high five",
-    "高五": "high five",
+    "棒球": "baseball",
+    "棒球投球": "baseball pitch",
+    "棒球挥棒": "baseball swing",
+    "棒球击球": "baseball bat hit",
+    "篮球": "basketball",
+    "篮球运球": "basketball dribble",
+    "篮球投篮": "basketball shoot",
+    "篮球传球": "basketball pass",
+    "足球": "soccer football",
+    "足球射门": "soccer kick shoot",
+    "网球": "tennis",
+    "排球": "volleyball",
+    "高尔夫": "golf",
+    "跳舞": "dance dancing",
+    "舞蹈": "dance dancing",
+    "扭动身体": "dance dancing",
+    "拍手鼓掌": "clap applaud",
+    "拍手": "clap applaud",
+    "鼓掌": "clap applaud",
+    "互相击掌": "high five clap hands palms",
+    "击掌": "high five clap hands palms",
+    "高五": "high five clap hands palms",
+    "台球": "billiard pool cue",
+    "小提琴": "violin play violin bowed string instrument",
+    "持琴": "hold violin instrument",
+    "拉奏": "play violin bow string instrument",
+    "扫弦": "strum strings guitar",
+    "弹奏": "play piano instrument",
+    "琴前": "piano instrument",
+    "绑腿": "three legged race",
+    "腿绑在一起": "three legged race",
+    "三人四脚": "three legged race",
+    "交换名片": "exchange business cards",
+    "名片": "business card",
     "站在": "stand",
     "站着": "stand",
     "站": "stand",
@@ -242,6 +274,46 @@ def read_npy_frame_count(path: Path) -> int | None:
         shape = header.get("shape") if isinstance(header, dict) else None
         return int(shape[0]) if isinstance(shape, tuple) and shape and int(shape[0]) > 0 else None
     except (OSError, UnicodeDecodeError, ValueError, SyntaxError, struct.error):
+        return None
+
+
+def read_glb_frame_count(path: Path) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            if handle.read(4) != b"glTF":
+                return None
+            version, total_length = struct.unpack("<II", handle.read(8))
+            if version != 2 or total_length < 20:
+                return None
+            while handle.tell() + 8 <= total_length:
+                chunk_length, chunk_type = struct.unpack("<I4s", handle.read(8))
+                chunk = handle.read(chunk_length)
+                if chunk_type != b"JSON":
+                    continue
+                gltf = json.loads(chunk.rstrip(b" \t\r\n\x00").decode("utf-8"))
+                accessors = gltf.get("accessors") if isinstance(gltf, dict) else None
+                animations = gltf.get("animations") if isinstance(gltf, dict) else None
+                if not isinstance(accessors, list) or not isinstance(animations, list):
+                    return None
+                counts: list[int] = []
+                for animation in animations:
+                    if not isinstance(animation, dict):
+                        continue
+                    for sampler in animation.get("samplers") or ():
+                        if not isinstance(sampler, dict):
+                            continue
+                        input_index = sampler.get("input")
+                        if not isinstance(input_index, int) or input_index < 0 or input_index >= len(accessors):
+                            continue
+                        accessor = accessors[input_index]
+                        if not isinstance(accessor, dict):
+                            continue
+                        count = int(accessor.get("count") or 0)
+                        if count > 0:
+                            counts.append(count)
+                return max(counts) if counts else None
+        return None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, struct.error, ValueError, TypeError):
         return None
 
 
@@ -318,9 +390,15 @@ def canonicalize_token(token: str) -> str:
 
 def extract_cjk_alias_tokens(raw_token: str) -> list[str]:
     tokens: list[str] = []
+    occupied: list[range] = []
     for alias, mapped in sorted(TOKEN_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
         if not contains_cjk(alias) or alias not in raw_token:
             continue
+        start = raw_token.find(alias)
+        span = range(start, start + len(alias))
+        if any(max(span.start, other.start) < min(span.stop, other.stop) for other in occupied):
+            continue
+        occupied.append(span)
         for token in tokenize(mapped):
             if token not in tokens:
                 tokens.append(token)
@@ -396,6 +474,28 @@ def first_query_value(query: dict[str, list[str]], name: str) -> str | None:
 
 def alias_tokens_to_search_text(alias_tokens: list[str]) -> str:
     return normalize_whitespace(" ".join(token for token in alias_tokens if token.isascii()))
+
+
+def semantic_query_text(text: str) -> str:
+    normalized = normalize_whitespace(text)
+    if not contains_cjk(normalized):
+        return normalized
+    alias_text = alias_tokens_to_search_text(tokenize(normalized))
+    if not alias_text:
+        return normalized
+    return normalize_whitespace(f"{normalized} {alias_text}")
+
+
+def resolve_index_glb_path(value: Any, cache_root: Path, fallback: Path) -> Path:
+    text = normalize_whitespace(str(value or ""))
+    if not text:
+        return fallback
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        return path
+    if path.parts[:2] == ("cache", "models"):
+        return SCRIPT_DIR / path
+    return cache_root / path
 
 
 @dataclass(frozen=True)
@@ -605,7 +705,8 @@ class MotionIndex:
         if not dataset or not motion_id or not str(source_motion) or not object_id:
             return None
 
-        cache_glb = cache_root / dataset / f"{motion_id}.glb"
+        fallback_cache_glb = cache_root / dataset / f"{motion_id}.glb"
+        cache_glb = resolve_index_glb_path(row.get("cache_glb"), cache_root, fallback_cache_glb)
         source_title = clean_motion_title(dataset, motion_id)
         search_text = normalize_whitespace(" ".join([dataset, motion_id, source_title, description, *captions]))
         token_counts = Counter(tokenize(search_text))
@@ -634,12 +735,12 @@ class MotionIndex:
     def frame_count_for(self, entry: MotionEntry) -> int | None:
         if entry.frame_count is not None:
             return entry.frame_count
-        if entry.dataset != "motionxpp":
+        if entry.dataset not in {"motionxpp", "motionlab"}:
             return None
         with self._frame_count_lock:
             if entry.object_id in self._frame_count_cache:
                 return self._frame_count_cache[entry.object_id]
-        value = read_npy_frame_count(entry.source_motion)
+        value = read_glb_frame_count(entry.source_motion) if entry.dataset == "motionlab" else read_npy_frame_count(entry.source_motion)
         with self._frame_count_lock:
             self._frame_count_cache[entry.object_id] = value
         return value
@@ -919,6 +1020,15 @@ def create_temporary_glb(
     except BaseException:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
+
+
+def existing_glb_path_for_entry(entry: MotionEntry) -> Path | None:
+    if entry.dataset != "motionlab":
+        return None
+    for path in (entry.cache_glb, entry.source_motion):
+        if path.is_file() and path.suffix.lower() == ".glb":
+            return path
+    return None
 
 
 class MotionQueryServer(ThreadingHTTPServer):
@@ -1224,7 +1334,12 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 if search_query:
                     semantic = self.app_server.semantic_retriever() if retrieval_mode in {"semantic", "hybrid"} else None
                     if retrieval_mode in {"semantic", "hybrid"} and semantic is not None:
-                        hybrid = self.app_server.motion_index.search_hybrid(search_query, semantic, top_k=None)
+                        hybrid = self.app_server.motion_index.search_hybrid(
+                            self._prepare_search_text(search_query),
+                            semantic,
+                            top_k=None,
+                            semantic_query=semantic_query_text(search_query),
+                        )
                         scored = [(score, entry) for score, entry, _detail in hybrid]
                     else:
                         scored = self.app_server.motion_index.search_entries(search_query, top_k=None)
@@ -1627,7 +1742,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                     semantic,
                     top_k=candidate_k,
                     candidate_k=candidate_k,
-                    semantic_query=text,
+                    semantic_query=semantic_query_text(text),
                 )
                 candidates = [(score, entry) for score, entry, detail in hybrid]
                 explanations = {entry.object_id: detail for _score, entry, detail in hybrid}
@@ -2053,15 +2168,18 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             job_dir: Path | None = None
             response_started = False
             try:
-                model_path, job_dir = create_temporary_glb(
-                    entry,
-                    model_dir=self.app_server.model_dir,
-                    frame_step=self.app_server.frame_step,
-                    interx_fps=self.app_server.interx_fps,
-                    converter_env=self.app_server.converter_env,
-                    conda_exe=self.app_server.conda_exe,
-                    temp_root=self.app_server.temp_root,
-                )
+                model_path = existing_glb_path_for_entry(entry)
+                generated = model_path is None
+                if model_path is None:
+                    model_path, job_dir = create_temporary_glb(
+                        entry,
+                        model_dir=self.app_server.model_dir,
+                        frame_step=self.app_server.frame_step,
+                        interx_fps=self.app_server.interx_fps,
+                        converter_env=self.app_server.converter_env,
+                        conda_exe=self.app_server.conda_exe,
+                        temp_root=self.app_server.temp_root,
+                    )
                 file_size = model_path.stat().st_size
                 self.send_response(HTTPStatus.OK)
                 self._send_cors_headers()
@@ -2069,7 +2187,7 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(file_size))
                 filename = f"{Path(entry.motion_id).name or entry.object_id}.glb"
                 self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-                self.send_header("X-Multimotion-Generated", "true")
+                self.send_header("X-Multimotion-Generated", "true" if generated else "false")
                 self.end_headers()
                 response_started = True
                 with model_path.open("rb") as handle:

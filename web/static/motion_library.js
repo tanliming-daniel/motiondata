@@ -204,7 +204,7 @@ function applyFacetCounts(nodes, facets) {
 function renderDatasetFilters() {
   const counts = state.facets.dataset || {};
   const root = $("#datasetFilters");
-  root.innerHTML = ["interhuman", "interx", "motionxpp"].map((dataset) => chip(dataset, counts[dataset], state.filters.dataset === dataset, `data-dataset="${dataset}"`)).join("");
+  root.innerHTML = ["interhuman", "interx", "motionxpp", "motionlab"].map((dataset) => chip(dataset, counts[dataset], state.filters.dataset === dataset, `data-dataset="${dataset}"`)).join("");
   root.querySelectorAll("[data-dataset]").forEach((button) => button.addEventListener("click", () => {
     state.filters.dataset = state.filters.dataset === button.dataset.dataset ? "" : button.dataset.dataset;
     state.offset = 0;
@@ -240,7 +240,6 @@ function tagsFor(item, { interactive = true, limit = 3 } = {}) {
     .map((node) => ({ label: node.label, id: node.id, domain: true }));
   const values = [
     ...actionValues,
-    ...(item.confidence_level === "low" ? [{ label: "待复核", confidence: true }] : []),
     { label: labels.participants || "未知" },
   ].slice(0, limit);
   return values.map((value) => interactive && value.id

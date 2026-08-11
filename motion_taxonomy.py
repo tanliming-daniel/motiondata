@@ -292,7 +292,7 @@ def _entry_text(entry: Any) -> str:
 def _participants_for_dataset(dataset: str) -> str:
     if dataset in {"interhuman", "interx"}:
         return "pair"
-    if dataset == "motionxpp":
+    if dataset in {"motionxpp", "motionlab"}:
         return "single"
     return "group_or_unknown"
 
