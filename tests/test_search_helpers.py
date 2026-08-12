@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from http import HTTPStatus
 import sys
 import tempfile
+import threading
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import local_motion_query_api as api  # noqa: E402
 from build_motion_index import build_motionlab_records, glb_stem_to_description, read_glb_frame_count  # noqa: E402
-from local_motion_query_api import MotionIndex, existing_glb_path_for_entry, semantic_query_text, tokenize  # noqa: E402
-from query_api_client import duplicate_rate  # noqa: E402
+from local_motion_query_api import MotionIndex, build_error_payload, existing_glb_path_for_entry, semantic_query_text, tokenize  # noqa: E402
+from query_api_client import duplicate_rate, extract_results, model_download_url  # noqa: E402
 from search_index import (  # noqa: E402
     clean_motion_title,
     clean_search_caption,
@@ -149,6 +156,155 @@ class SearchHelperTest(unittest.TestCase):
         ]
 
         self.assertAlmostEqual(duplicate_rate(results), 1 / 3)
+
+    def test_search_item_contains_direct_glb_and_preview_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            glb_path = root / "Air_Squat.glb"
+            glb_path.write_bytes(b"glTF")
+            preview_root = root / "previews"
+            preview_path = preview_root / "motionlab" / "Air_Squat.webp"
+            preview_path.parent.mkdir(parents=True)
+            preview_path.write_bytes(b"RIFFxxxxWEBPxxxx")
+            index_path = root / "motion_index.jsonl"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "motionlab",
+                        "motion_id": "Air_Squat",
+                        "source_motion": str(glb_path),
+                        "caption_file": str(glb_path),
+                        "captions": ["Air Squat"],
+                        "description": "Air Squat",
+                        "object_id": "motionlab-air-squat",
+                        "cache_glb": str(glb_path),
+                        "frame_count": 61,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            index = MotionIndex.from_jsonl(index_path, cache_root=root / "cache")
+            entry = index.get_entry("motionlab-air-squat")
+            self.assertIsNotNone(entry)
+            assert entry is not None
+
+            handler = api.MotionQueryRequestHandler.__new__(api.MotionQueryRequestHandler)
+            handler.server = SimpleNamespace(motion_index=index, server_address=("127.0.0.1", 7091))
+            handler.headers = {"Host": "motion.example.test"}
+
+            with patch.object(api, "DEFAULT_PREVIEW_ROOT", preview_root):
+                item = handler._serialize_search_item(entry, rank=1, score=2.0, max_score=2.0)
+
+            self.assertEqual(item["rank"], 1)
+            self.assertEqual(item["object_id"], "motionlab-air-squat")
+            self.assertEqual(item["frame_count"], 61)
+            self.assertEqual(item["glb"]["url"], "http://motion.example.test/api/v1/models/motionlab-air-squat")
+            self.assertEqual(item["glb"]["filename"], "Air_Squat.glb")
+            self.assertEqual(item["glb"]["content_type"], api.MODEL_CONTENT_TYPE)
+            self.assertEqual(item["model"]["download_url"], item["glb"]["url"])
+            self.assertTrue(item["preview"]["available"])
+            self.assertEqual(item["preview"]["url"], "http://motion.example.test/api/v1/previews/motionlab-air-squat.webp")
+
+    def test_error_payload_uses_stable_external_contract(self) -> None:
+        self.assertEqual(
+            build_error_payload(HTTPStatus.BAD_REQUEST, "bad request"),
+            {"status": "error", "code": "INVALID_REQUEST", "message": "bad request", "details": {}},
+        )
+        self.assertEqual(
+            build_error_payload(HTTPStatus.INTERNAL_SERVER_ERROR, "conversion failed", code="CONVERSION_FAILED")["code"],
+            "CONVERSION_FAILED",
+        )
+
+    def test_search_endpoint_returns_external_contract_and_error_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            glb_path = root / "Air_Squat.glb"
+            glb_path.write_bytes(b"glTF")
+            index_path = root / "motion_index.jsonl"
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "motionlab",
+                        "motion_id": "Air_Squat",
+                        "source_motion": str(glb_path),
+                        "caption_file": str(glb_path),
+                        "captions": ["Air Squat"],
+                        "description": "Air Squat",
+                        "object_id": "motionlab-air-squat",
+                        "cache_glb": str(glb_path),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            index = MotionIndex.from_jsonl(index_path, cache_root=root / "cache")
+            server = api.MotionQueryServer(
+                ("127.0.0.1", 0),
+                api.MotionQueryRequestHandler,
+                index,
+                model_dir=root,
+                frame_step=1,
+                interx_fps=30.0,
+                converter_env="",
+                conda_exe="conda",
+                semantic_model=None,
+                semantic_index=None,
+                semantic_device="cpu",
+                reranker_model=None,
+                reranker_device="cpu",
+                search_prewarm=False,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base_url = f"http://127.0.0.1:{server.server_address[1]}"
+                request = Request(
+                    f"{base_url}/api/v1/searches",
+                    data=json.dumps({"text": "Air Squat"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=10) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(payload["status"], "ok")
+                self.assertEqual(payload["query"]["top_k"], 5)
+                self.assertEqual(payload["items"][0]["glb"]["url"], f"{base_url}/api/v1/models/motionlab-air-squat")
+
+                bad_request = Request(
+                    f"{base_url}/api/v1/searches",
+                    data=json.dumps({}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(bad_request, timeout=10)
+                error_payload = json.loads(raised.exception.read().decode("utf-8"))
+                self.assertEqual(error_payload["status"], "error")
+                self.assertEqual(error_payload["code"], "INVALID_REQUEST")
+                self.assertIn("text", error_payload["message"])
+                self.assertEqual(error_payload["details"], {})
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_client_prefers_new_items_glb_contract(self) -> None:
+        response = {
+            "items": [
+                {
+                    "object_id": "one",
+                    "glb": {"url": "http://motion.example.test/api/v1/models/one", "filename": "one.glb"},
+                }
+            ],
+            "results": [{"object_id": "legacy"}],
+        }
+        results = extract_results(response)
+
+        self.assertEqual(results[0]["object_id"], "one")
+        self.assertEqual(
+            model_download_url(results[0], "http://fallback.example.test"),
+            "http://motion.example.test/api/v1/models/one",
+        )
 
 
 if __name__ == "__main__":

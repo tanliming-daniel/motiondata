@@ -140,23 +140,10 @@ python3 build_taxonomy_assignments.py --stage all \
 
 ## 搜索
 
-最直接的方式是 POST 搜索接口。
-默认先按中文使用：
+最直接的方式是 POST 搜索接口。对外正式参数只需要 `text` 和 `top_k`：
 
 ```bash
 curl -X POST http://127.0.0.1:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"握手","top_k":3}'
-```
-
-默认 `randomness=0`，相同索引和参数会返回固定排序。需要探索性结果时可以显式提高随机性：
-
-```bash
-curl -X POST http://127.0.0.1:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"走路","top_k":3,"randomness":0}'
-```
-
-如果需要可复现的随机结果，可以同时传 `randomness` 和 `random_seed`：
-
-```bash
-curl -X POST http://127.0.0.1:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"走路","top_k":3,"randomness":0.25,"random_seed":"demo"}'
 ```
 
 也可以直接写完整中文描述：
@@ -165,11 +152,51 @@ curl -X POST http://127.0.0.1:7091/api/v1/searches   -H 'Content-Type: applicati
 curl -X POST http://127.0.0.1:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"两个人握手","top_k":3}'
 ```
 
-返回结果里最重要的是 `object_id` 和 `model.download_url`。
+返回结果里最重要的是 `items[].glb.url`，它是可以直接请求的 GLB 下载地址：
+
+```json
+{
+  "status": "ok",
+  "query": {"text": "两个人握手", "top_k": 3, "result_count": 3},
+  "items": [
+    {
+      "rank": 1,
+      "object_id": "84c081...",
+      "description": "Two people shake hands.",
+      "glb": {
+        "url": "http://127.0.0.1:7091/api/v1/models/84c081...",
+        "filename": "G022T000A001R005.glb",
+        "content_type": "model/gltf-binary",
+        "lazy": true
+      }
+    }
+  ]
+}
+```
 
 ## 下载 GLB
 
-拿到 `object_id` 后，直接下载模型：
+推荐直接使用搜索返回的 `items[0].glb.url` 下载模型：
+
+```python
+import json
+import urllib.request
+
+payload = json.dumps({"text": "两个人握手", "top_k": 3}, ensure_ascii=False).encode("utf-8")
+request = urllib.request.Request(
+    "http://127.0.0.1:7091/api/v1/searches",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request) as response:
+    result = json.loads(response.read().decode("utf-8"))
+
+glb_url = result["items"][0]["glb"]["url"]
+urllib.request.urlretrieve(glb_url, "result.glb")
+```
+
+也可以拿到 `object_id` 后，直接拼下载地址：
 
 ```bash
 curl -L "http://127.0.0.1:7091/api/v1/models/<object_id>" -o result.glb
@@ -267,7 +294,7 @@ curl http://42.193.117.211:7091/api/v1/health
 curl -X POST http://42.193.117.211:7091/api/v1/searches   -H 'Content-Type: application/json'   -d '{"text":"握手","top_k":3}'
 ```
 
-公网接口同样默认使用确定性排序；探索性结果可在 JSON 里显式提高 `randomness`。
+公网搜索结果同样从 `items[].glb.url` 读取 GLB 下载地址。
 
 如果你想直接用客户端：
 
@@ -277,8 +304,7 @@ python3 query_api_client.py   --base-url http://42.193.117.211:7091   --text "�
 
 ### 公网下载模型
 
-先搜索，拿到返回结果里的 `object_id`。
-再下载：
+先搜索，优先使用返回结果里的 `items[0].glb.url` 下载。也可以拿到 `object_id` 后直接拼下载地址：
 
 ```bash
 curl -L "http://42.193.117.211:7091/api/v1/models/<object_id>" -o result.glb

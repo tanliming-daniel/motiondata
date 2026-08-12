@@ -53,13 +53,16 @@ def download_binary(url: str, timeout: int) -> bytes:
 
 
 def extract_results(response: dict[str, Any]) -> list[dict[str, Any]]:
+    items = response.get("items")
+    if isinstance(items, list):
+        return items
     results = response.get("results")
     if isinstance(results, list):
         return results
     data = response.get("data")
     if isinstance(data, list):
         return data
-    raise ApiClientError("Response does not contain 'results' or 'data'.")
+    raise ApiClientError("Response does not contain 'items', 'results', or 'data'.")
 
 
 def resolve_url(candidate: str | None, base_url: str) -> str | None:
@@ -71,6 +74,11 @@ def resolve_url(candidate: str | None, base_url: str) -> str | None:
 
 
 def model_download_url(result: dict[str, Any], base_url: str) -> str | None:
+    glb = result.get("glb")
+    if isinstance(glb, dict):
+        resolved = resolve_url(glb.get("url"), base_url)
+        if resolved:
+            return resolved
     model = result.get("model")
     if isinstance(model, dict):
         for key in ("download_url", "rest_download_path", "download_path"):
@@ -275,9 +283,11 @@ def main() -> int:
             url = model_download_url(result, base_url)
             if not url:
                 continue
+            glb_value = result.get("glb")
+            glb = glb_value if isinstance(glb_value, dict) else {}
             model_value = result.get("model")
             model = model_value if isinstance(model_value, dict) else {}
-            filename = str(model.get("filename") or f"rank_{rank:02d}_{result.get('object_id', 'model')}.glb")
+            filename = str(glb.get("filename") or model.get("filename") or f"rank_{rank:02d}_{result.get('object_id', 'model')}.glb")
             target = models_dir / f"rank_{rank:02d}_{filename}"
             target.write_bytes(download_binary(url, args.timeout))
             saved_models.append(str(target))

@@ -472,6 +472,29 @@ def first_query_value(query: dict[str, list[str]], name: str) -> str | None:
     return value or None
 
 
+def default_error_code(status_code: HTTPStatus) -> str:
+    if status_code == HTTPStatus.NOT_FOUND:
+        return "NOT_FOUND"
+    if status_code == HTTPStatus.BAD_REQUEST:
+        return "INVALID_REQUEST"
+    return "INTERNAL_ERROR"
+
+
+def build_error_payload(
+    status_code: HTTPStatus,
+    message: str,
+    *,
+    code: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "code": code or default_error_code(status_code),
+        "message": message,
+        "details": details or {},
+    }
+
+
 def alias_tokens_to_search_text(alias_tokens: list[str]) -> str:
     return normalize_whitespace(" ".join(token for token in alias_tokens if token.isascii()))
 
@@ -1788,40 +1811,37 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             candidates = [*ranked, *remaining]
         max_score = max((score for score, _entry in candidates), default=None)
         results = self._rerank_results(candidates, top_k=top_k, randomness=randomness, random_seed=random_seed)
-        data = [
-            self._serialize_entry(entry, include_model_info=include_model_info, score=score, max_score=max_score, retrieval=explanations.get(entry.object_id))
-            for score, entry in results
-        ]
         selected_encoder = (
             self.app_server.semantic_encoder_name()
             if retrieval_mode in {"semantic", "hybrid"}
             else LOCAL_ENCODER_NAME
         )
 
-        common = {
-            "query_mode": "text",
-            "requested_encoder": payload.get("encoder"),
-            "selected_encoder": selected_encoder,
-            "top_k": top_k,
-            "candidate_k": candidate_k,
-            "candidate_count": len(candidates),
-            "randomness": randomness,
-            "random_seed": random_seed,
-            "result_count": len(data),
-            "results": data,
-            "warnings": warnings,
-            "query_text": text,
-            "search_text": search_text,
-            "retrieval_mode": retrieval_mode,
-            "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
-            "rerank": use_reranker,
-            "diversity": use_diversity,
-            "data": data,
-        }
         if legacy_mode:
+            legacy_data = [
+                self._serialize_entry(entry, include_model_info=include_model_info, score=score, max_score=max_score, retrieval=explanations.get(entry.object_id))
+                for score, entry in results
+            ]
             response = {
                 "status": "completed",
-                **common,
+                "query_mode": "text",
+                "requested_encoder": payload.get("encoder"),
+                "selected_encoder": selected_encoder,
+                "top_k": top_k,
+                "candidate_k": candidate_k,
+                "candidate_count": len(candidates),
+                "randomness": randomness,
+                "random_seed": random_seed,
+                "result_count": len(legacy_data),
+                "results": legacy_data,
+                "warnings": warnings,
+                "query_text": text,
+                "search_text": search_text,
+                "retrieval_mode": retrieval_mode,
+                "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
+                "rerank": use_reranker,
+                "diversity": use_diversity,
+                "data": legacy_data,
                 "index": {
                     "encoder_name": LOCAL_ENCODER_NAME,
                     "db_path": str(self.app_server.motion_index.source_path),
@@ -1834,38 +1854,34 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                     "rerank": use_reranker,
                     "diversity": use_diversity,
                 },
-                "meta": {"result_count": len(data), "entry_count": len(self.app_server.motion_index.entries)},
+                "meta": {"result_count": len(legacy_data), "entry_count": len(self.app_server.motion_index.entries)},
                 "links": {
                     "self": self._absolute_url("/query"),
                     "rest_search": self._absolute_url(f"{API_PREFIX}/searches"),
                 },
             }
         else:
+            items = [
+                self._serialize_search_item(entry, rank=rank, score=score, max_score=max_score)
+                for rank, (score, entry) in enumerate(results, start=1)
+            ]
             response = {
                 "status": "ok",
-                "retrieval_mode": retrieval_mode,
-                "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
-                "rerank": use_reranker,
-                "diversity": use_diversity,
                 "query": {
-                    "mode": "text",
                     "text": text,
-                    "search_text": search_text,
                     "top_k": top_k,
-                    "candidate_k": candidate_k,
-                    "requested_encoder": payload.get("encoder"),
+                    "result_count": len(items),
+                },
+                "items": items,
+                "data": items,
+                "results": items,
+                "meta": {
+                    "result_count": len(items),
+                    "entry_count": len(self.app_server.motion_index.entries),
+                    "retrieval_mode": retrieval_mode,
+                    "ranking_version": HYBRID_ENCODER_NAME if retrieval_mode in {"semantic", "hybrid"} else LOCAL_ENCODER_NAME,
                     "selected_encoder": selected_encoder,
                     "candidate_count": len(candidates),
-                    "retrieval_mode": retrieval_mode,
-                    "randomness": randomness,
-                    "random_seed": random_seed,
-                },
-                "data": data,
-                "results": data,
-                "meta": {
-                    "result_count": len(data),
-                    "entry_count": len(self.app_server.motion_index.entries),
-                    "supports_text": True,
                     "lazy_conversion": True,
                 },
                 "warnings": warnings,
@@ -2119,6 +2135,51 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
             }
         return payload
 
+    def _serialize_search_item(
+        self,
+        entry: MotionEntry,
+        *,
+        rank: int,
+        score: float,
+        max_score: float | None,
+    ) -> dict[str, Any]:
+        rest_download_path = f"{API_PREFIX}/models/{entry.object_id}"
+        preview_path = self._resolve_preview_path(entry)
+        preview_available = preview_path is not None
+        preview_is_canonical = bool(preview_path and preview_path.with_suffix(preview_path.suffix + ".canonical-v2").is_file())
+        preview_download_path = f"{API_PREFIX}/previews/{entry.object_id}.webp"
+        filename = f"{Path(entry.motion_id).name or entry.object_id}.glb"
+        glb_url = self._absolute_url(rest_download_path)
+        item = {
+            "rank": rank,
+            "score": round(score, 6),
+            "pooled_score": round(score / max_score, 6) if max_score else 0.0,
+            "object_id": entry.object_id,
+            "dataset": entry.dataset,
+            "motion_id": entry.motion_id,
+            "description": entry.description,
+            "frame_count": self.app_server.motion_index.frame_count_for(entry),
+            "glb": {
+                "url": glb_url,
+                "filename": filename,
+                "content_type": MODEL_CONTENT_TYPE,
+                "lazy": True,
+            },
+            "preview": {
+                "url": self._absolute_url(preview_download_path),
+                "available": preview_available,
+                "rotation_degrees": 0.0 if preview_is_canonical else self.app_server.motion_index.preview_rotation_for(entry),
+            },
+        }
+        item["model"] = {
+            "download_url": glb_url,
+            "rest_download_path": rest_download_path,
+            "filename": filename,
+            "available": True,
+            "lazy": True,
+        }
+        return item
+
     def _preview_path_for(self, entry: MotionEntry) -> Path:
         return DEFAULT_PREVIEW_ROOT / entry.dataset / f"{entry.motion_id}.webp"
 
@@ -2202,10 +2263,18 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 raise
             except SystemExit as exc:
                 if not response_started:
-                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"Failed to convert motion to GLB: {exc}")
+                    self._send_error_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        f"Failed to convert motion to GLB: {exc}",
+                        code="CONVERSION_FAILED",
+                    )
             except Exception as exc:
                 if not response_started:
-                    self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, f"Failed to convert motion to GLB: {exc}")
+                    self._send_error_json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        f"Failed to convert motion to GLB: {exc}",
+                        code="CONVERSION_FAILED",
+                    )
             finally:
                 if job_dir is not None:
                     shutil.rmtree(job_dir, ignore_errors=True)
@@ -2281,13 +2350,134 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
                 f"{API_PREFIX}/library": {"get": {"summary": "List classified motion entries for the web UI"}},
                 f"{API_PREFIX}/taxonomy": {"get": {"summary": "Fetch motion taxonomy axes"}},
                 f"{API_PREFIX}/entries/{{object_id}}": {"get": {"summary": "Fetch one motion entry"}},
-                f"{API_PREFIX}/searches": {"post": {"summary": "Run text search without GLB conversion"}},
+                f"{API_PREFIX}/searches": {
+                    "post": {
+                        "summary": "Search motions and return GLB download URLs",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/SearchRequest"},
+                                    "examples": {"handshake": {"value": {"text": "两个人握手", "top_k": 3}}},
+                                }
+                            },
+                        },
+                        "responses": {
+                            "200": {
+                                "description": "Search results with lazy GLB download URLs.",
+                                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SearchResponse"}}},
+                            },
+                            "400": {
+                                "description": "Invalid request.",
+                                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            },
+                        },
+                    }
+                },
                 f"{API_PREFIX}/models/{{object_id}}": {
-                    "get": {"summary": "Convert the selected motion to a temporary GLB, then download it"}
+                    "get": {
+                        "summary": "Convert the selected motion to a temporary GLB, then download it",
+                        "parameters": [
+                            {
+                                "name": "object_id",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            }
+                        ],
+                        "responses": {
+                            "200": {
+                                "description": "GLB binary.",
+                                "content": {MODEL_CONTENT_TYPE: {"schema": {"type": "string", "format": "binary"}}},
+                            },
+                            "404": {
+                                "description": "Unknown object_id.",
+                                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            },
+                            "500": {
+                                "description": "GLB conversion failed.",
+                                "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}},
+                            },
+                        },
+                    }
                 },
                 f"{API_PREFIX}/previews/{{object_id}}.webp": {
                     "get": {"summary": "Download the static WebP motion thumbnail"}
                 },
+            },
+            "components": {
+                "schemas": {
+                    "SearchRequest": {
+                        "type": "object",
+                        "required": ["text"],
+                        "properties": {
+                            "text": {"type": "string", "description": "Chinese or English motion description."},
+                            "top_k": {"type": "integer", "minimum": 1, "maximum": MAX_PAGE_SIZE, "default": 5},
+                        },
+                        "additionalProperties": True,
+                    },
+                    "SearchResponse": {
+                        "type": "object",
+                        "required": ["status", "query", "items", "meta", "warnings"],
+                        "properties": {
+                            "status": {"type": "string", "const": "ok"},
+                            "query": {
+                                "type": "object",
+                                "properties": {
+                                    "text": {"type": "string"},
+                                    "top_k": {"type": "integer"},
+                                    "result_count": {"type": "integer"},
+                                },
+                            },
+                            "items": {"type": "array", "items": {"$ref": "#/components/schemas/SearchItem"}},
+                            "meta": {"type": "object", "additionalProperties": True},
+                            "warnings": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "SearchItem": {
+                        "type": "object",
+                        "required": ["rank", "object_id", "glb", "preview"],
+                        "properties": {
+                            "rank": {"type": "integer"},
+                            "score": {"type": "number"},
+                            "pooled_score": {"type": "number"},
+                            "object_id": {"type": "string"},
+                            "dataset": {"type": "string"},
+                            "motion_id": {"type": "string"},
+                            "description": {"type": "string"},
+                            "frame_count": {"type": ["integer", "null"]},
+                            "glb": {
+                                "type": "object",
+                                "required": ["url", "filename", "content_type", "lazy"],
+                                "properties": {
+                                    "url": {"type": "string", "format": "uri"},
+                                    "filename": {"type": "string"},
+                                    "content_type": {"type": "string", "const": MODEL_CONTENT_TYPE},
+                                    "lazy": {"type": "boolean"},
+                                },
+                            },
+                            "preview": {
+                                "type": "object",
+                                "required": ["url", "available", "rotation_degrees"],
+                                "properties": {
+                                    "url": {"type": "string", "format": "uri"},
+                                    "available": {"type": "boolean"},
+                                    "rotation_degrees": {"type": "number"},
+                                },
+                            },
+                        },
+                    },
+                    "ErrorResponse": {
+                        "type": "object",
+                        "required": ["status", "code", "message", "details"],
+                        "properties": {
+                            "status": {"type": "string", "const": "error"},
+                            "code": {"type": "string"},
+                            "message": {"type": "string"},
+                            "details": {"type": "object", "additionalProperties": True},
+                        },
+                    },
+                }
             },
         }
 
@@ -2446,8 +2636,15 @@ class MotionQueryRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
-    def _send_error_json(self, status_code: HTTPStatus, message: str) -> None:
-        self._send_json(status_code, {"status": "failed", "message": message})
+    def _send_error_json(
+        self,
+        status_code: HTTPStatus,
+        message: str,
+        *,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self._send_json(status_code, build_error_payload(status_code, message, code=code, details=details))
 
     def log_message(self, format: str, *args: Any) -> None:
         return
